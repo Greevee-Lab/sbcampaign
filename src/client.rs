@@ -127,7 +127,11 @@ impl Client {
         fields.push(format!("MESSAGE={args}"));
 
         // TODO: Do something if this results in an error?
+        #[cfg(feature = "journal")]
         let _ = systemd::journal::send(&fields.iter().map(|f| f.as_str()).collect::<Vec<&str>>());
+
+        #[cfg(not(feature = "journal"))]
+        eprintln!("<{}>{}", level, fields.join(" "));
     }
 }
 
@@ -151,6 +155,7 @@ pub enum ClientError {
     #[error("SQLx error occured")]
     SQLError(#[from] sqlx::Error),
 
+    #[cfg(feature = "journal")]
     #[error("SystemD error occured")]
     SystemDError(#[from] systemd::Error),
 }
@@ -381,6 +386,7 @@ async fn main(
                 client_log!(client, 3, "SQL Error: {}", sql_err);
                 let _ = client.send_command(TxCommand::Reject).await;
             }
+            #[cfg(feature = "journal")]
             ClientError::SystemDError(sysd_err) => {
                 client_log!(client, 3, "SystemD Error: {}", sysd_err);
                 let _ = client.send_command(TxCommand::Reject).await;

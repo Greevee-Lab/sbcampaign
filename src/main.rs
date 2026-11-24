@@ -1,3 +1,4 @@
+#[cfg(feature = "journal")]
 macro_rules! systemd_log {
     ($level:expr, $fmt:expr) => {
         systemd::journal::log($level, file!(), line!(), module_path!(), &format_args!($fmt))
@@ -5,6 +6,30 @@ macro_rules! systemd_log {
     ($level:expr, $fmt:expr, $($args:tt)*) => {
         systemd::journal::log($level, file!(), line!(), module_path!(), &format_args!($fmt, $($args)*))
     };
+}
+
+// Without the journal feature, log to stderr using the "<priority>" prefix
+// understood by systemd/syslog style log collectors.
+#[cfg(not(feature = "journal"))]
+macro_rules! systemd_log {
+    ($level:expr, $fmt:expr) => {
+        $crate::stderr_log($level, file!(), line!(), module_path!(), &format_args!($fmt))
+    };
+    ($level:expr, $fmt:expr, $($args:tt)*) => {
+        $crate::stderr_log($level, file!(), line!(), module_path!(), &format_args!($fmt, $($args)*))
+    };
+}
+
+#[cfg(not(feature = "journal"))]
+pub fn stderr_log(
+    level: usize,
+    file: &str,
+    line: u32,
+    module: &str,
+    args: &std::fmt::Arguments<'_>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    writeln!(std::io::stderr(), "<{level}>{module} ({file}:{line}): {args}")
 }
 
 pub mod client;
@@ -21,12 +46,9 @@ use std::{
     path::Path,
     sync::OnceLock,
 };
+#[cfg(feature = "journal")]
 use systemd::daemon::{STATE_READY, STATE_STATUS, STATE_STOPPING, notify};
-use tokio::{
-    join,
-    net::TcpListener,
-    signal::unix::{SignalKind, signal},
-};
+use tokio::{join, net::TcpListener};
 use tokio_util::sync::CancellationToken;
 use toml::Table;
 
@@ -186,13 +208,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Launch the listener task to accept new clients
     let client_listener_handle = tokio::spawn(client::listener(listener, cancel_token.clone()));
 
+    #[cfg(feature = "journal")]
     if !notify([(STATE_READY, "1"), (STATE_STATUS, "Running")].iter())? {
         eprintln!("Failed to contact SystemD service for Ready");
     }
 
-    let mut sigterm = signal(SignalKind::terminate())?;
-    sigterm.recv().await;
+    wait_for_shutdown().await?;
 
+    #[cfg(feature = "journal")]
     if !notify([(STATE_STOPPING, "1"), (STATE_STATUS, "Stopping")].iter())? {
         eprintln!("Failed to contact SystemD service for Stopping");
     }
@@ -201,6 +224,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _ = join!(service_handle, client_listener_handle);
     return Ok(());
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown() -> std::io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigterm = signal(SignalKind::terminate())?;
+    sigterm.recv().await;
+    Ok(())
+}
+
+// Platforms without Unix signals (e.g. local testing on Windows): stop on Ctrl+C
+#[cfg(not(unix))]
+async fn wait_for_shutdown() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
 }
 
 async fn database_connect(database_config: &Table) -> Result<PgPool, sqlx::Error> {

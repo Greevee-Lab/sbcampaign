@@ -4,13 +4,20 @@ version = "0.1.0"
 authors = ["QuantX"]
 edition = "2024"
 
+[features]
+# Log to the systemd journal and notify systemd on start/stop.
+# Build with `--no-default-features` to log to stderr instead
+# (e.g. for local testing on machines without systemd).
+default = ["journal"]
+journal = ["dep:systemd"]
+
 [dependencies]
 bytes = "1.12.1"
 chrono = "0.4.45"
 futures = "0.3.34"
 num_enum = "0.7.6"
 sqlx = {version="0.9.0", features = ["runtime-tokio", "postgres", "uuid", "chrono"]}
-systemd = {version="0.11.1", features = ["journal"]}
+systemd = {version="0.11.1", features = ["journal"], optional = true}
 thiserror = "2.0.21"
 tokio = {version="1.54.1", features = ["full"]}
 tokio-stream = "0.1.19"
