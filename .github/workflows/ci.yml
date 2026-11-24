@@ -1,0 +1,108 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build, test, handshake
+    # Building on 24.04 keeps the glibc requirement low enough for newer
+    # server releases as well.
+    runs-on: ubuntu-24.04
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: sbcampaign
+          POSTGRES_DB: loc_campaign
+          # Throwaway CI container, reachable only from this job.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sbcampaign"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsystemd-dev pkg-config postgresql-client
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (release, default features)
+        run: cargo build --release --locked
+
+      - name: Test
+        run: cargo test --release --locked
+
+      - name: Build without systemd
+        run: cargo build --no-default-features --locked
+
+      - name: Set up database (reconstructed schema + synthetic seed)
+        env:
+          PGHOST: 127.0.0.1
+          PGUSER: sbcampaign
+          PGDATABASE: loc_campaign
+        run: |
+          for f in sql/fork/base_schema.sql sql/set_award_rank.sql sql/give_turn_award.sql \
+                   sql/give_round_award.sql sql/shop_drop.sql sql/fork/test_seed.sql; do
+            psql -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+
+      - name: Handshake test against the release binary
+        run: |
+          sed -e 's/^bind_port = .*/bind_port = 23457\nbind_ip = "127.0.0.1"/' \
+              -e 's/^database = .*/&\nhost = "127.0.0.1"\nport = 5432/' \
+              loc.toml > ci.toml
+          ./target/release/sbcampaign ci.toml > server.log 2>&1 &
+          SERVER_PID=$!
+          for i in $(seq 1 30); do
+            python3 -c "import socket; socket.create_connection(('127.0.0.1', 23457), 1).close()" 2>/dev/null && break
+            sleep 1
+          done
+          python3 tools/handshake_client.py --period
+          python3 tools/handshake_client.py --xuid 0x0009FFFF00000002 --period
+          kill "$SERVER_PID"
+
+      - name: Server log
+        if: always()
+        run: cat server.log || true
+
+      - name: Package
+        run: |
+          mkdir -p dist/sbcampaign
+          cp target/release/sbcampaign loc.toml dist/sbcampaign/
+          cp -r sql dist/sbcampaign/sql
+          echo "${GITHUB_SHA}" > dist/sbcampaign/COMMIT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbcampaign-x86_64-${{ github.sha }}
+          path: dist/sbcampaign
+          if-no-files-found: error
+
+  no-systemd:
+    name: Build and test without systemd (Windows)
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --no-default-features --locked
+      - run: cargo test --no-default-features --locked
