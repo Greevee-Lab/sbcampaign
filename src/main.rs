@@ -242,18 +242,36 @@ async fn wait_for_shutdown() -> std::io::Result<()> {
 }
 
 async fn database_connect(database_config: &Table) -> Result<PgPool, sqlx::Error> {
-    let connect = PgConnectOptions::new()
-        .username(
-            database_config["username"]
-                .as_str()
-                .expect("TOML is missing database.username"),
-        )
-        .socket(Path::new(
+    let connect = PgConnectOptions::new().username(
+        database_config["username"]
+            .as_str()
+            .expect("TOML is missing database.username"),
+    );
+
+    // Optional TCP connection (database.host / database.port / database.password),
+    // e.g. for local testing. Without database.host the Unix socket is used as before.
+    let connect = match database_config.get("host").and_then(|host| host.as_str()) {
+        Some(host) => {
+            let port = database_config
+                .get("port")
+                .and_then(|port| port.as_integer())
+                .map(|port| u16::try_from(port).expect("database.port is out of range"))
+                .unwrap_or(5432);
+            let connect = connect.host(host).port(port);
+            match database_config.get("password").and_then(|pw| pw.as_str()) {
+                Some(password) => connect.password(password),
+                None => connect,
+            }
+        }
+        None => connect.socket(Path::new(
             &database_config
                 .get("socket")
                 .and_then(|socket| socket.as_str())
                 .unwrap_or("/var/run/postgresql"),
-        ))
+        )),
+    };
+
+    let connect = connect
         .application_name(
             database_config["app_name"]
                 .as_str()
