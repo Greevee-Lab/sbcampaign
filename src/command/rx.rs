@@ -539,7 +539,7 @@ impl Decoder for CampaignCodec {
 
         let total_length = 4 + length as usize;
 
-        if src.len() < length as usize {
+        if src.len() < total_length {
             // Reserve all needed space
             src.reserve(total_length - src.len());
             return Ok(None);
@@ -710,5 +710,32 @@ impl Decoder for CampaignCodec {
         };
 
         return Ok(Some(command));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A frame whose payload arrives in several TCP segments must not be
+    // decoded before it is complete.
+    #[test]
+    fn decode_waits_for_complete_frame() {
+        let xuid: u64 = 0x0009_FFFF_0000_0001;
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&8u16.to_le_bytes());
+        frame.extend_from_slice(&(RxID::XUID as u16).to_le_bytes());
+        frame.extend_from_slice(&xuid.to_le_bytes());
+
+        let mut codec = CampaignCodec;
+        let mut buf = BytesMut::from(&frame[..10]);
+        assert!(matches!(codec.decode(&mut buf), Ok(None)));
+
+        buf.extend_from_slice(&frame[10..]);
+        match codec.decode(&mut buf) {
+            Ok(Some(RxCommand::XUID(v))) => assert_eq!(v, xuid),
+            _ => panic!("expected a decoded XUID command"),
+        }
+        assert!(buf.is_empty());
     }
 }
