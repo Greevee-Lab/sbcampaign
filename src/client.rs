@@ -130,8 +130,9 @@ impl Client {
         #[cfg(feature = "journal")]
         let _ = systemd::journal::send(&fields.iter().map(|f| f.as_str()).collect::<Vec<&str>>());
 
+        // Same layout as systemd_log! on stderr, followed by the client fields
         #[cfg(not(feature = "journal"))]
-        eprintln!("<{}>{}", level, fields.join(" "));
+        eprintln!("<{level}>{module} ({file}:{line}): {}", fields[4..].join(" "));
     }
 }
 
