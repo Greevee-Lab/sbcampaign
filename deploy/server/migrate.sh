@@ -58,7 +58,7 @@ apply() {
   {
     echo 'BEGIN;'
     cat "$file"
-    echo
+    echo ";"
     echo "INSERT INTO fork_migrations (name, kind, sha256) VALUES ('$name', '$kind', '$sum')"
     echo "  ON CONFLICT (name) DO UPDATE SET sha256 = EXCLUDED.sha256, applied_at = now();"
     echo 'COMMIT;'
