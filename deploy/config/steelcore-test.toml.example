@@ -11,8 +11,9 @@ motd_ja = """Steelbound キャンペーンシーズンへようこそ。
 健闘を祈る、パイロット。"""
 
 turn_days = 7
-# Short turns for tests (minutes, at least 10). Never set for a season.
-turn_minutes = 60
+# Short turns for tests (minutes). Use 120 or more: the game does not apply
+# results to the force map in the last hour of a turn. Never set for a season.
+turn_minutes = 180
 
 round_end_points = 100000
 

@@ -25,6 +25,11 @@ here as separate modules on top of the upstream logic.
 - Changes stay additive so upstream can be merged regularly, and general fixes
   are offered back to QuantX. See **[FORK.md](FORK.md)** for the rules, the
   list of changes and the license status.
+- A fresh database is playable from the start: the reinforcement shop
+  catalog is a migration (`sql/fork/shop_catalog.sql`), so new pilots can
+  buy their first VTs. A test campaign can use short turns with
+  `[campaign] turn_minutes` (at least 120 recommended: the game does not apply
+  results to the force map in the last hour of a turn).
 
 ## Building
 

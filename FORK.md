@@ -259,7 +259,9 @@ turn length and the running turn ends later than one turn from now, the
 running turn is shortened (a seeded test database would otherwise wait a
 week). A round still has 8 turns; factions are reset at turns 3 and 5 and
 at the start of a round (upstream rules). The production season does not
-set the key.
+set the key. Use at least 120 minutes: the game does not apply combat results
+to the force map in the last hour of a turn (its news text says so), so with
+one-hour turns no result would count.
 
 ## Note for upstream: unlimited VT stock
 
