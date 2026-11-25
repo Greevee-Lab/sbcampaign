@@ -123,10 +123,9 @@ jobs:
           bash tools/steelcore-ca.sh client "$ca" unregistered-ci
           bash tools/steelcore-ca.sh init "$other"
           bash tools/steelcore-ca.sh client "$other" steelnet-ci
-          sed -e 's/^bind_port = .*/bind_port = 23459
-bind_ip = "127.0.0.1"/'               -e 's/^database = .*/database = "migrate_ci"
-host = "127.0.0.1"
-port = 5432/'               loc.toml > core.toml
+          sed -e 's/^bind_port = .*/bind_port = 23459\nbind_ip = "127.0.0.1"/' \
+              -e 's/^database = .*/database = "migrate_ci"\nhost = "127.0.0.1"\nport = 5432/' \
+              loc.toml > core.toml
           cat >> core.toml <<EOF
           [core_api]
           bind = "127.0.0.1:47101"
