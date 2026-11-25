@@ -801,7 +801,8 @@ pub async fn vt_add(client: &mut Client, vt_list_in: VTIDList) -> CommandResult 
         }
 
         // Update the serial number and the remaining VT stock in the shop
-        sqlx::query("UPDATE shop SET \"serial\" = \"serial\" + $2, vtstock = GREATEST(vtstock - $3, 0) WHERE type = $1").bind(serial_stocks.id).bind(count as i64).bind(count as i16).execute(&mut *transaction).await?;
+        // NULL (unlimited) stays NULL; GREATEST(NULL - n, 0) would be 0 in PostgreSQL
+        sqlx::query("UPDATE shop SET \"serial\" = \"serial\" + $2, vtstock = vtstock - LEAST(vtstock, $3) WHERE type = $1").bind(serial_stocks.id).bind(count as i64).bind(count as i16).execute(&mut *transaction).await?;
 
         // Insert the new VTs into the garage
         for i in 0..count {

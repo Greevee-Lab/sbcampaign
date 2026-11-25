@@ -103,6 +103,10 @@ async fn new_pilot_can_buy_a_starting_vt() {
     let bought = core.add_vts(&mut client, vec![0]).await.unwrap();
     assert_eq!(vt_count(bought), 1);
     assert_eq!(vt_count(core.list_vts(&mut client).await.unwrap()), 1);
+    // An unlimited VT stays unlimited after a purchase (PostgreSQL GREATEST
+    // ignores NULL, so the stock must not be computed with it).
+    let after = shop_entries(core.list_shop(&mut client).await.unwrap());
+    assert!(after.iter().any(|&(t, limit, _)| t == 0 && limit == u32::MAX), "Vitzh gone after a purchase: {after:?}");
 
     // PRF sees its own catalog (Decider without a limit, Falchion limited).
     core.set_faction(&mut client, Faction::Prf).await.unwrap();
@@ -114,4 +118,12 @@ async fn new_pilot_can_buy_a_starting_vt() {
     assert!(prf.iter().all(|&(t, _, _)| t != 0 && t != 2), "HSD VT in the PRF shop: {prf:?}");
     // The HSD VT stays in the HSD garage.
     assert_eq!(vt_count(core.list_vts(&mut client).await.unwrap()), 0);
+    // A limited VT loses exactly the bought number.
+    if let Some(&(_, before, _)) = prf.iter().find(|&&(t, _, _)| t == 5) {
+        assert_eq!(vt_count(core.add_vts(&mut client, vec![5, 5]).await.unwrap()), 2);
+        let prf2 = shop_entries(core.list_shop(&mut client).await.unwrap());
+        let left = prf2.iter().find(|&&(t, _, _)| t == 5).map(|&(_, l, _)| l).unwrap_or(0);
+        assert_eq!(left, before - 2, "Falchion stock");
+        assert_eq!(vt_count(core.list_vts(&mut client).await.unwrap()), 2);
+    }
 }

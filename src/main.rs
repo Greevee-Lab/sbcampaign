@@ -61,6 +61,8 @@ use toml::Table;
 #[derive(Debug)]
 pub struct CampaignConfig {
     turn_days: u16,
+    /// Fork: optional short turn length (campaign_core::turn).
+    pub turn_minutes: Option<u32>,
 
     motd_en: String,
     motd_ja: String,
@@ -123,6 +125,7 @@ impl CampaignConfig {
                 .and_then(|v| v.as_integer())
                 .and_then(|v| u16::try_from(v).ok())
                 .unwrap_or(7),
+            turn_minutes: campaign_core::turn::parse_turn_minutes(campaign_config),
 
             motd_en: campaign_config
                 .get("motd_en")

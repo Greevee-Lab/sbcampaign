@@ -11,6 +11,7 @@
 pub mod gateway;
 pub mod identity;
 pub mod profile;
+pub mod turn;
 
 #[cfg(test)]
 mod tests;

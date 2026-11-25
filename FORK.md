@@ -58,6 +58,8 @@ of the campaign core of [steelcore](https://github.com/Greevee-Lab/steelcore).
 | Sign-in tickets: verification of Ed25519 tickets from an identity provider (signature, issuer, campaign, lifetime, key rotation), `[ticket]` configuration section, shared test vectors from the issuer | `src/ticket/`, `testdata/`, `deploy/config/*.example`, `Cargo.toml` (`ed25519-dalek`) | no |
 | Steelbound gateway: public TLS listener (`[gateway_steelbound]`), prelude with the sign-in ticket, then the unchanged original protocol for the identity from the ticket (reported `qwUserID` ignored); rate limits per source and identity, connection and time limits, plausibility bounds for results, audit row per write, results ledger and annulment per identity; `GatewayCore` boundary; suspended identities refused in `open_session` | `src/gateway_steelbound/`, `src/core_api/gateway.rs`, `src/campaign_core/gateway.rs`, `src/campaign_core/identity.rs`, `sql/fork/gateway.sql`, `sql/fork/gateway_annul.sql`, `deploy/server/annul.sh`, `deploy/units/steelcore-annul.service`, `tools/gateway_client.py`, `tools/gateway-cert.sh`, `src/main.rs` (start the listener) | no |
 | Shop catalog: the 31 VT types of the reinforcement shop (faction, cost, limit, turn of release) as a `once` migration with full stock and serials from 1; without it a new pilot cannot buy a VT and MISSION SELECT stays disabled. Upstream fills `shop` with a one-off import from its old database (`sql/shop_migration.sql`) | `sql/fork/shop_catalog.sql`, `sql/fork/migrations.list`, `src/campaign_core/shop_tests.rs` | maybe: a seed file for new installs (see below) |
+| Optional short turns: `[campaign] turn_minutes` (at least 10) replaces the fixed one-week turn and scales the shop drops; at start the running turn is shortened to at most one turn from now. Without the key nothing changes. Meant for the test campaign | `src/campaign_core/turn.rs`, `src/service.rs` (turn length), `src/main.rs` (config field), `deploy/config/steelcore-test.toml.example` | maybe (configurable turn length) |
+| Fix: buying an unlimited VT (`vtstock` NULL) set its stock to 0 (`GREATEST(NULL - n, 0)` is 0 in PostgreSQL), so the VT vanished from every shop until the next restock | `src/command.rs` (`vt_add`) | **yes** (see below) |
 
 ## Players, identities and the core boundary
 
@@ -247,3 +249,24 @@ u16 count`, then per entry `u16 type, u32 limit, u16 cost, u8 pad`
 
 Note for upstream: a new installation needs this catalog as a seed; a
 small `sql/shop_seed.sql` would let others run the server from scratch.
+
+## Turn length
+
+Upstream ends every turn one week after the previous one. `[campaign]
+turn_minutes = N` (optional, at least 10) uses N minutes instead; the shop
+drops are spread over that length. When the service starts with a short
+turn length and the running turn ends later than one turn from now, the
+running turn is shortened (a seeded test database would otherwise wait a
+week). A round still has 8 turns; factions are reset at turns 3 and 5 and
+at the start of a round (upstream rules). The production season does not
+set the key.
+
+## Note for upstream: unlimited VT stock
+
+`vt_add` updated the stock with `vtstock = GREATEST(vtstock - $3, 0)`. For an
+unlimited VT (`vtstock IS NULL`) PostgreSQL's `GREATEST` ignores the NULL
+and returns 0, so after the first purchase the VT disappears from every
+shop (`COALESCE(vtstock, 1) > 0`) until the turn restock. MySQL returns
+NULL there, which is probably why it worked before the port. The fix is
+`vtstock = vtstock - LEAST(vtstock, $3)` (NULL stays NULL, otherwise the
+same as before). Candidate for a small pull request.

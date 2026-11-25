@@ -33,7 +33,11 @@ async fn main_inner() -> Result<Duration, sqlx::Error> {
         Duration::ZERO
     };
 
-    let shop_drop_interval = Duration::from_hours(cfg.turn_days as u64 * 24) / cfg.shop_drop_count;
+    let turn_length = crate::campaign_core::turn::turn_length(cfg.turn_minutes);
+    let shop_drop_interval = match cfg.turn_minutes {
+        Some(_) => turn_length / cfg.shop_drop_count,
+        None => Duration::from_hours(cfg.turn_days as u64 * 24) / cfg.shop_drop_count,
+    };
 
     if remaining > shop_drop_interval {
         sqlx::query("CALL shop_drop($1, $2)")
@@ -98,11 +102,12 @@ async fn main_inner() -> Result<Duration, sqlx::Error> {
         round_turn_time.turn
     );
     sqlx::query(
-        "INSERT INTO settings (round, turn, period) VALUES ($1, $2, $3 + INTERVAL '1 WEEK')",
+        "INSERT INTO settings (round, turn, period) VALUES ($1, $2, $3 + make_interval(secs => $4))",
     )
     .bind(round_turn_time.round)
     .bind(round_turn_time.turn)
     .bind(round_turn_time.period)
+    .bind(turn_length.as_secs() as f64)
     .execute(pg)
     .await?;
 
@@ -111,6 +116,17 @@ async fn main_inner() -> Result<Duration, sqlx::Error> {
 
 pub async fn main(cancel_token: CancellationToken) {
     let _ = systemd_log!(7, "Service Task: Started");
+
+    let turn_length = crate::campaign_core::turn::turn_length(crate::get_config().turn_minutes);
+    match crate::campaign_core::turn::clamp_running_turn(crate::get_pool(), turn_length).await {
+        Ok(true) => {
+            let _ = systemd_log!(5, "Service Task: turn length {} min, running turn shortened", turn_length.as_secs() / 60);
+        }
+        Ok(false) => {}
+        Err(err) => {
+            let _ = systemd_log!(3, "Service Task (Error): {}", err);
+        }
+    }
 
     loop {
         let sleep_duration = match main_inner().await {
