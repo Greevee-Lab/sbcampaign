@@ -82,6 +82,36 @@ pub(super) async fn test_pool() -> Option<PgPool> {
     }
 }
 
+/// The runtime of every test that runs upstream commands. Those use the
+/// server's global pool (`crate::get_pool()`); its connections belong to the
+/// runtime that opened them, so all such tests share this one runtime.
+pub(super) fn globals_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("test runtime")
+    })
+}
+
+/// Set the server's globals (pool, campaign configuration) for upstream
+/// commands and return the pool. Call inside [`globals_runtime`] only.
+pub(super) async fn global_pool() -> Option<PgPool> {
+    if let Some(pool) = crate::PG_POOL.get() {
+        return Some(pool.clone());
+    }
+    let pool = test_pool().await?;
+    let _ = crate::PG_POOL.set(pool);
+    let campaign: toml::Table = include_str!("../../loc.toml").parse::<toml::Table>().unwrap()["campaign"]
+        .as_table()
+        .unwrap()
+        .clone();
+    let _ = crate::CONFIG.set(crate::CampaignConfig::new(&campaign));
+    Some(crate::PG_POOL.get().unwrap().clone())
+}
+
 /// Synthetic Steelbound account ids, unique per test and per run.
 pub(super) fn synthetic_account(test: u32) -> u32 {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
@@ -216,16 +246,13 @@ fn session(transport: BoxedTransport) -> Client {
 /// A Steelbound player goes through the core boundary only: resolve, open the
 /// session, register a pilot, choose a faction, report stats. The upstream
 /// commands store everything under the derived player_id.
-#[tokio::test]
-async fn db_steelbound_player_through_the_core() {
-    let Some(pool) = test_pool().await else { return };
-    // The upstream commands use the server's globals.
-    let _ = crate::PG_POOL.set(pool.clone());
-    let campaign: toml::Table = include_str!("../../loc.toml").parse::<toml::Table>().unwrap()["campaign"]
-        .as_table()
-        .unwrap()
-        .clone();
-    let _ = crate::CONFIG.set(crate::CampaignConfig::new(&campaign));
+#[test]
+fn db_steelbound_player_through_the_core() {
+    globals_runtime().block_on(steelbound_player_through_the_core());
+}
+
+async fn steelbound_player_through_the_core() {
+    let Some(pool) = global_pool().await else { return };
 
     let core = SbCampaignCore::new(pool.clone());
     let (ours, _theirs) = tokio::io::duplex(64);

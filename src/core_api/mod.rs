@@ -23,6 +23,7 @@
 #![allow(dead_code)] // Called by the Steelbound gateway, which is the next step.
 
 pub mod dispatch;
+pub mod gateway;
 pub mod names;
 pub mod profile;
 pub mod net;
@@ -195,7 +196,7 @@ pub trait CampaignCore: Send + Sync {
     /// Bind a resolved identity to a session: sets `client.xuid` to the
     /// player_id and loads name, faction, language and ban state, like the
     /// upstream handshake does after `0x2020`. Returns false if the player is
-    /// banned (the session must then be rejected).
+    /// banned or the identity suspended (the session must then be rejected).
     fn open_session(
         &self,
         client: &mut Client,

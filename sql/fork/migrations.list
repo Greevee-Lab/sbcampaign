@@ -18,3 +18,5 @@ repeatable  give_round_award.sql
 repeatable  shop_drop.sql
 once        fork/identity.sql
 once        fork/core_api.sql
+once        fork/gateway.sql
+repeatable  fork/gateway_annul.sql

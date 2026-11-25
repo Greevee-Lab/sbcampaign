@@ -149,7 +149,7 @@ pub async fn resolve_identity(
 }
 
 /// See [`crate::core_api::CampaignCore::open_session`]. Same account lookup
-/// as the upstream handshake.
+/// as the upstream handshake; also refuses suspended identities.
 pub async fn open_session(pool: &PgPool, client: &mut Client, resolved: &ResolvedIdentity) -> Result<bool, ClientError> {
     #[derive(sqlx::FromRow)]
     struct Account {
@@ -177,5 +177,12 @@ pub async fn open_session(pool: &PgPool, client: &mut Client, resolved: &Resolve
     client.language = account.language;
     client.banned = account.banned;
 
-    Ok(!account.banned)
+    // A suspended identity may not play, even with a still valid ticket.
+    let suspended: bool = sqlx::query_scalar("SELECT suspended FROM identity WHERE identity_id = $1")
+        .bind(resolved.identity_id)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or(false);
+
+    Ok(!account.banned && !suspended)
 }

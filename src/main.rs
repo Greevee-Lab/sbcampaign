@@ -39,6 +39,7 @@ pub mod service;
 // Fork additions (steelcore): core boundary, its implementation, sign-in tickets.
 pub mod campaign_core;
 pub mod core_api;
+pub mod gateway_steelbound;
 pub mod ticket;
 
 use crate::command::VTID;
@@ -221,6 +222,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
+    // Fork: Steelbound gateway (TLS + ticket), only if [gateway_steelbound] is configured.
+    let gateway_handle = gateway_steelbound::start(
+        &root_config,
+        std::sync::Arc::new(campaign_core::SbCampaignCore::new(get_pool().clone())),
+        cancel_token.clone(),
+    )
+    .await?;
+
     #[cfg(feature = "journal")]
     if !notify([(STATE_READY, "1"), (STATE_STATUS, "Running")].iter())? {
         eprintln!("Failed to contact SystemD service for Ready");
@@ -237,6 +246,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _ = join!(service_handle, client_listener_handle);
     if let Some(handle) = core_api_handle {
+        let _ = handle.await;
+    }
+    if let Some(handle) = gateway_handle {
         let _ = handle.await;
     }
     return Ok(());

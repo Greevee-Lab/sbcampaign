@@ -30,7 +30,9 @@ jar_round_awards = [28, 28, 28, 17, 17, 17, 17, 17, 17, 17]
 shop_drop_count = 28
 
 [network]
-# Original protocol: loopback only. Public access goes through a gateway later.
+# Original protocol: loopback only (it trusts the XUID the game reports).
+# Public access goes through [gateway_steelbound], which refuses to start
+# unless bind_ip is a loopback address.
 bind_ip = "127.0.0.1"
 bind_port = 23457
 
@@ -52,6 +54,43 @@ campaign = "steelbound-s1"
 public_keys = []
 max_clock_skew = 60
 max_lifetime = 3600
+
+[gateway_steelbound]
+# Steelbound gateway: TLS + sign-in ticket ([ticket] above), then the
+# original protocol for the identity from the ticket. Remove the section (or
+# set enabled = false) to run without it.
+# Public TLS port (open it in the host firewall once the gateway runs).
+bind = "0.0.0.0:47100"
+# Self-signed ECDSA P-256 certificate (tools/gateway-cert.sh). Clients pin
+# the SHA-256 of its public key; the server logs the pin at startup.
+cert = "/etc/steelcore/gateway/server.crt"
+key = "/etc/steelcore/gateway/server.key"
+# "1.2" (TLS 1.2 with ECDHE + AEAD, and 1.3) or "1.3".
+tls_min = "1.2"
+
+# Optional; defaults shown (deploy/README.md, "Steelbound gateway").
+[gateway_steelbound.limits]
+max_connections = 256
+max_connections_per_source = 8
+source_connect_rate = 2.0
+source_connect_burst = 30
+source_failure_rate = 0.1
+source_failure_burst = 10
+identity_connect_rate = 2.0
+identity_connect_burst = 30
+identity_command_rate = 5.0
+identity_command_burst = 40
+results_per_hour = 60
+identity_result_burst = 10
+max_commands_per_connection = 8
+tls_handshake_timeout_secs = 10
+prelude_timeout_secs = 5
+connection_lifetime_secs = 60
+max_user_stat = 100000
+max_mission_points = 10000
+max_map = 3
+turn_grace = 1
+max_vt_list = 64
 
 [core_api]
 # Network Core API steelcore.v1 (gRPC + Connect-JSON over mutual TLS 1.3).
