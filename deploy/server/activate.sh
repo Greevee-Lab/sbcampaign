@@ -62,7 +62,7 @@ if [ "$mode" != --rollback ]; then
     [ -n "$previous" ] && switch "$previous"
     exit 1
   fi
-  "${admin[@]}" logs steelcore-migrate 20 | grep -E 'applied|unchanged' | tail -n 4 || true
+  "${admin[@]}" logs steelcore-migrate 20 | grep -E "applied|unchanged" | tail -n 2 || true
 fi
 
 for svc in steelcore steelcore-test; do
