@@ -244,6 +244,24 @@ fn plausibility_bounds() {
     assert_eq!(ok(RxCommand::GetUserInfo), Ok(()));
 }
 
+/// The results of a short campaign battle (draw, no kills, both forces) are
+/// accepted: the client reports zero statistics and zero mission points for
+/// both forces of the map.
+#[test]
+fn campaign_battle_results_are_plausible() {
+    let p = Plausibility::default();
+    let now = Some((1, 1));
+    for (me, other) in [(Faction::Hsd, Faction::Prf), (Faction::Prf, Faction::Hsd)] {
+        assert_eq!(limits::check(&p, &user_point(1, 1, 1, 0), now, me), Ok(()));
+        assert_eq!(limits::check(&p, &mission_point(1, 1, 0, me), now, me), Ok(()));
+        assert_eq!(limits::check(&p, &mission_point(1, 1, 0, other), now, me), Ok(()));
+        assert_eq!(limits::check(&p, &mission_point(1, 1, 10, other), now, me), Ok(()));
+    }
+    // After a turn change the result of the battle still counts once.
+    assert_eq!(limits::check(&p, &user_point(1, 1, 1, 0), Some((1, 2)), Faction::Hsd), Ok(()));
+    assert_eq!(limits::check(&p, &user_point(1, 1, 1, 0), Some((1, 3)), Faction::Hsd), Err("wrong_period"));
+}
+
 #[test]
 fn writes_are_classified() {
     assert_eq!(limits::write_name(&RxCommand::GetUserInfo), None);
