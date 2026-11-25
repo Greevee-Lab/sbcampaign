@@ -2,8 +2,8 @@
 # Installed by the host admin tool from /opt/steelcore/units (deploy/README.md).
 # No User=/Group=/Slice= lines: the host sets them (user steelcore, steelcore.slice).
 #
-# Main campaign service (original protocol), loopback only until a gateway
-# exists. Config: /etc/steelcore/steelcore.toml (database steelcore).
+# Main campaign service: original protocol on loopback, Steelbound gateway
+# (public TLS) if configured. Config: /etc/steelcore/steelcore.toml (database steelcore).
 [Unit]
 Description=steelcore campaign service (LoC, database steelcore)
 After=network.target postgresql.service
@@ -17,8 +17,10 @@ RestartSec=5
 TimeoutStopSec=20
 
 # The original protocol stays on loopback; enforced here as well as in the config.
-IPAddressDeny=any
-IPAddressAllow=localhost
+# No IPAddressDeny=any: the Steelbound gateway ([gateway_steelbound]) is a
+# public TLS port. The upstream listener (it trusts reported XUIDs) and the
+# Core API stay on loopback through their bind addresses, and the gateway
+# refuses to start unless [network] bind_ip is a loopback address.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 MemoryDenyWriteExecute=true
 MemoryHigh=160M

@@ -7,6 +7,9 @@
 #   deploy/deploy.sh --rollback <release>   switch back to an older release
 #   deploy/deploy.sh --status               run the status check
 #   deploy/deploy.sh --releases             list the releases on the server
+#   deploy/deploy.sh --annul <db> <provider> <external_id> [apply] [suspend]
+#                                           annul the results of one identity
+#                                           (dry run without "apply")
 #
 # Environment:
 #   STEELCORE_SSH      ssh target, e.g. deploy@campaign.example.org (required)
@@ -35,6 +38,16 @@ case "${1:-}" in
             echo \"\$m \$r \$(stat -c %y $root/\$r | cut -c1-16)\"; done"
   exit $?
   ;;
+--annul)
+  shift
+  line="$*"
+  [[ "$line" =~ ^(steelcore|steelcore_test)\ (steelbound|insignia)\ [0-9A-Fa-fx]{1,18}(\ (apply|suspend))*$ ]] ||
+    { echo "usage: deploy.sh --annul <steelcore|steelcore_test> <provider> <external_id> [apply] [suspend]" >&2; exit 2; }
+  remote "set -e; umask 027; mkdir -p /etc/steelcore/annul; echo '$line' > /etc/steelcore/annul/request
+    sudo steelnet-admin svc start steelcore-annul || true
+    sudo steelnet-admin logs steelcore-annul 6"
+  exit $?
+  ;;
 --rollback)
   rel=${2:?usage: deploy.sh --rollback <release>}
   [[ "$rel" =~ ^[0-9a-f]{7,40}$ ]] || { echo "invalid release: $rel" >&2; exit 2; }
@@ -42,7 +55,7 @@ case "${1:-}" in
   exit $?
   ;;
 '' | -*)
-  sed -n '4,16p' "$0"
+  sed -n '4,19p' "$0"
   exit 2
   ;;
 esac

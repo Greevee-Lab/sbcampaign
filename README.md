@@ -16,8 +16,9 @@ and stores its state in PostgreSQL.
 This fork is the code base of the campaign core of
 **[steelcore](https://github.com/Greevee-Lab/steelcore)**, the plan for one
 shared campaign across clients. It is meant to bring the campaign to
-**Steelbound** players. Player identity, a core boundary and a Steelbound
-gateway will be added here as separate modules on top of the upstream logic.
+**Steelbound** players. Player identity, a core boundary, a network Core API
+and a Steelbound gateway (public TLS access with sign-in tickets) are added
+here as separate modules on top of the upstream logic.
 
 - The **Insignia campaign is not affected.** It keeps running from the
   upstream code on its own server.

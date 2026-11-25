@@ -8,8 +8,9 @@
 # Checks: main service active, campaign listener bound to loopback only,
 # protocol ping against the main service (handshake up to the XUID request, no
 # database write), full handshake against the test instance (database round
-# trip), the collected status of steelcore-status.service (database ping) and
-# the age of the newest backup. Prints one line per check and "ok" at the end,
+# trip), the Steelbound gateways where configured (TLS, pin, ticket required),
+# the collected status of steelcore-status.service (database ping) and the age
+# of the newest backup. Prints one line per check and "ok" at the end,
 # or "FAIL" and exits 1.
 set -uo pipefail
 
@@ -59,6 +60,29 @@ if [ "$state" = active ]; then
     fail "test instance handshake on port $test_port"
   fi
 fi
+
+# Steelbound gateway (public TLS), where configured: listener up, TLS with the
+# expected key (pin from the certificate), a request without ticket is refused.
+# Touches no data.
+gw_cert=${GATEWAY_CERT:-/etc/steelcore/gateway/server.crt}
+check_gateway() {
+  local config=$1 port=$2 pin
+  [ -r "$config" ] || { info "gateway: $config not readable, skipped"; return; }
+  grep -q '^\[gateway_steelbound\]' "$config" || { info "gateway: not configured in $(basename "$config")"; return; }
+  if ! ss -Hltn "sport = :$port" | grep -q .; then
+    fail "gateway: no listener on port $port"
+    return
+  fi
+  pin=$(openssl x509 -in "$gw_cert" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null |
+    sha256sum | cut -d' ' -f1)
+  if python3 "$release/tools/gateway_client.py" --port "$port" --pin "$pin" --case missing --quiet >/dev/null 2>&1; then
+    pass "gateway on port $port: TLS, pin ${pin:0:16}..., ticket required"
+  else
+    fail "gateway on port $port: TLS/pin/ticket check"
+  fi
+}
+check_gateway /etc/steelcore/steelcore.toml "${GATEWAY_PORT:-47100}"
+[ "$state" = active ] && check_gateway /etc/steelcore/steelcore-test.toml "${GATEWAY_TEST_PORT:-47103}"
 
 if [ -r "$status_file" ]; then
   now=$(date +%s)

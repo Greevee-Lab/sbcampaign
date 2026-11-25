@@ -3,7 +3,8 @@
 # No User=/Group=/Slice= lines: the host sets them (user steelcore, steelcore.slice).
 #
 # Test campaign instance: same binary, database steelcore_test (synthetic data
-# only), loopback port 23458. Config: /etc/steelcore/steelcore-test.toml.
+# only), loopback port 23458, Steelbound gateway (public TLS) if configured.
+# Config: /etc/steelcore/steelcore-test.toml.
 [Unit]
 Description=steelcore test campaign (LoC, database steelcore_test)
 After=network.target postgresql.service
@@ -16,8 +17,10 @@ Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20
 
-IPAddressDeny=any
-IPAddressAllow=localhost
+# No IPAddressDeny=any: the Steelbound gateway ([gateway_steelbound]) is a
+# public TLS port. The upstream listener (it trusts reported XUIDs) and the
+# Core API stay on loopback through their bind addresses, and the gateway
+# refuses to start unless [network] bind_ip is a loopback address.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 MemoryDenyWriteExecute=true
 MemoryHigh=96M

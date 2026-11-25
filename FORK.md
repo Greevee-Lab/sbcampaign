@@ -56,6 +56,7 @@ of the campaign core of [steelcore](https://github.com/Greevee-Lab/steelcore).
 | CI: database tests against a migrated test database, identity backfill check | `.github/workflows/ci.yml` | no |
 | Core API `steelcore.v1`: Protobuf contract, gRPC and Connect-JSON bindings on one mutual-TLS listener (`[core_api]`), provider accesses with scopes, rate limit, idempotency keys, write audit; display names (gamertag rules, look-alike check, blocklist, change limit, reservation); identity suspension; `ProfileCore` boundary with PostgreSQL store | `proto/`, `build.rs`, `src/core_api/names.rs`, `src/core_api/profile.rs`, `src/core_api/net/`, `src/campaign_core/profile.rs`, `sql/fork/core_api.sql`, `tools/steelcore-ca.sh`, `tools/core_api_client.py`, `src/main.rs` (start the listener), `Cargo.toml` | no |
 | Sign-in tickets: verification of Ed25519 tickets from an identity provider (signature, issuer, campaign, lifetime, key rotation), `[ticket]` configuration section, shared test vectors from the issuer | `src/ticket/`, `testdata/`, `deploy/config/*.example`, `Cargo.toml` (`ed25519-dalek`) | no |
+| Steelbound gateway: public TLS listener (`[gateway_steelbound]`), prelude with the sign-in ticket, then the unchanged original protocol for the identity from the ticket (reported `qwUserID` ignored); rate limits per source and identity, connection and time limits, plausibility bounds for results, audit row per write, results ledger and annulment per identity; `GatewayCore` boundary; suspended identities refused in `open_session` | `src/gateway_steelbound/`, `src/core_api/gateway.rs`, `src/campaign_core/gateway.rs`, `src/campaign_core/identity.rs`, `sql/fork/gateway.sql`, `sql/fork/gateway_annul.sql`, `deploy/server/annul.sh`, `deploy/units/steelcore-annul.service`, `tools/gateway_client.py`, `tools/gateway-cert.sh`, `src/main.rs` (start the listener) | no |
 
 ## Players, identities and the core boundary
 
@@ -154,8 +155,70 @@ shortcut.
   A provider may only rename players it has an identity for.
 - **Operation:** `deploy/README.md`, section "Core API".
 
-## Planned additions
+## Steelbound gateway
 
-A gateway for Steelbound players (TLS listener next to the upstream listener:
-ticket first, then the unchanged original protocol) built on the core
-boundary and the sign-in tickets above.
+The upstream listener trusts the XUID the game reports in `0x2020`; it is
+meant for a trusted service in front of it and stays on loopback here. Public
+access for Steelbound players goes through a second listener,
+`src/gateway_steelbound/`:
+
+1. **TLS only** (rustls; TLS 1.2 with ECDHE + AEAD, or 1.3 only with
+   `tls_min = "1.3"`). Players have no client certificates. The client pins
+   the server key: SHA-256 of the certificate's DER `SubjectPublicKeyInfo`,
+   logged at startup (`tools/gateway-cert.sh pin <cert>` prints it too). The
+   certificate may be self-signed; renewing it with the same key keeps the pin.
+2. **Prelude** before the original protocol, big-endian:
+   `"SBGW"`, version `1`, flags `0`, `u16` ticket length, ticket (format v1 of
+   `src/ticket/`). The server answers 6 bytes `"SBGW"`, `1`, status:
+   `0` ok (the original protocol follows), `1` refused, `2` busy (rate
+   limit), `3` unsupported. Every ticket problem (missing, malformed,
+   expired, forged, wrong campaign) is the same `1`: no oracle. The reason is
+   logged on the server only.
+3. The gateway resolves `(steelbound, <account id>)` through
+   `CampaignCore::resolve_identity` and `open_session` (banned players and
+   **suspended identities** are rejected with `0x3014`), then serves the
+   **unchanged original protocol** through `core_api::dispatch`. The
+   `qwUserID` of `0x2020` is read and ignored. When a pilot is registered
+   (`0x5022`), the stored Xbox Live name is the display name from the ticket,
+   not the one the game sends.
+4. **No database code** in the gateway: everything goes through
+   `CampaignCore` and the new `GatewayCore` (`src/core_api/gateway.rs`:
+   audit, results ledger, annulment); `core_api::rules` enforces it.
+
+**Protection** (`[gateway_steelbound.limits]`, defaults in `deploy/README.md`):
+
+- Before TLS: total connections, open connections per source, new
+  connections per source (token bucket), and a lockout after too many
+  refused tickets. A source is an IPv4 address or an IPv6 /64. Addresses are
+  kept in memory only, never logged or stored.
+- Per identity: accepted connections, commands, reported results (token
+  buckets); commands per connection; timeouts for the TLS handshake, the
+  prelude and the whole connection.
+- **Plausibility** of reported results: `AddUserPoint` and `AddMissionPoint`
+  must name the current round and the current or previous turn, a map up to
+  `max_map`, at most `max_user_stat` per stat and `max_mission_points` per
+  report, mission points only for HSD/PRF/RB; VT lists at most `max_vt_list`
+  entries. An implausible result is answered like a success (the game cannot
+  tell) but not applied; other implausible commands are rejected.
+- **Audit:** one row in `audit_log` per write command (source
+  `gateway-steelbound`, identity, player, command, outcome `ok`, `error`,
+  `implausible` or `rate_limited`, time). No pilot data, names or points.
+- **Results ledger** `gateway_result`: every applied result with its
+  identity, because leaderboard and war tide only hold sums.
+- **Annulment** `annul_identity_results()` (`sql/fork/gateway_annul.sql`):
+  subtracts an identity's ledger rows from leaderboard and war tide (never
+  below zero), marks them annulled, optionally suspends the identity, writes
+  an audit row; dry run possible. Awards already handed out at a turn or
+  round end are not recomputed. Operation: `deploy/README.md`, "Annul results".
+
+**Hooks in upstream files:** `src/main.rs` starts the listener (one module
+line, starting and awaiting the listener in `main`). Nothing else upstream
+changes.
+
+**Tests:** prelude, tickets (valid, expired, forged, tampered, missing),
+admission and rate limits, plausibility, configuration (the gateway refuses
+to start unless `[network] bind_ip` is loopback), TLS end to end with pin,
+and with a database: pilot register/load/save and faction through the
+gateway with a foreign `qwUserID`, audit rows, results ledger, annulment and
+the suspended identity being refused. `tools/gateway_client.py` runs the same
+cases against a running server (CI does this against the release binary).

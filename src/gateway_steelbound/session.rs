@@ -45,7 +45,7 @@ pub(super) async fn run<C: CampaignCore + GatewayCore>(
         banned: false,
     };
     let account = ticket.account;
-    let result = session(gw, &mut client, ticket).await;
+    let result = session(gw, &mut client, ticket).await.map_err(closed_is_disconnect);
     let reply = match result {
         Ok(()) | Err(ClientError::Disconnected) => None,
         Err(ClientError::Timeout) => Some(TxCommand::Retry),
@@ -58,6 +58,20 @@ pub(super) async fn run<C: CampaignCore + GatewayCore>(
         let _ = client.send_command(cmd).await;
     }
     let _ = futures::SinkExt::close(&mut client.codec).await;
+}
+
+/// A peer that closes TLS without a close_notify alert (common for clients
+/// that just drop the connection after the answer) is a normal disconnect.
+fn closed_is_disconnect(err: ClientError) -> ClientError {
+    use std::io::ErrorKind::*;
+    match err {
+        ClientError::CodecError(command::CampaignCodecError::Io(e))
+            if matches!(e.kind(), UnexpectedEof | ConnectionReset | ConnectionAborted | BrokenPipe) =>
+        {
+            ClientError::Disconnected
+        }
+        other => other,
+    }
 }
 
 fn describe(err: &ClientError) -> String {

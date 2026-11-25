@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsystemd-dev pkg-config postgresql-client
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsystemd-dev pkg-config postgresql-client python3-cryptography
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -95,7 +95,7 @@ jobs:
           bash deploy/server/migrate.sh migrate_ci_prod sql/fork/preseason.sql
           test "$(psql -At -d migrate_ci_prod -c 'SELECT count(*) FROM settings')" = 1
 
-      - name: Database tests (identity, core boundary) and identity backfill
+      - name: Database tests (identity, core boundary, gateway) and identity backfill
         env:
           PGHOST: 127.0.0.1
           PGUSER: sbcampaign
@@ -107,6 +107,8 @@ jobs:
           grep -q "db_steelbound_player_through_the_core ... ok" dbtest.log
           grep -q "db_core_api_display_names ... ok" dbtest.log
           grep -q "db_core_api_idempotency_and_audit ... ok" dbtest.log
+          grep -q "db_gateway_pilot_session ... ok" dbtest.log
+          grep -q "db_gateway_results_plausibility_annul ... ok" dbtest.log
           createdb backfill_ci
           bash tools/test_identity_backfill.sh backfill_ci
 
@@ -162,6 +164,57 @@ jobs:
           kill "$SERVER_PID"
           cat core.log
 
+      - name: Steelbound gateway (TLS + ticket) against the release binary
+        env:
+          PGHOST: 127.0.0.1
+          PGUSER: sbcampaign
+        run: |
+          gw=$RUNNER_TEMP/gw
+          bash tools/gateway-cert.sh new "$gw"
+          python3 -c "import os; open('$RUNNER_TEMP/ticket.key', 'w').write(os.urandom(32).hex())"
+          pub=$(python3 tools/gateway_client.py --key-file "$RUNNER_TEMP/ticket.key" --print-public-key)
+          pin=$(bash tools/gateway-cert.sh pin "$gw/server.crt")
+          sed -e 's/^bind_port = .*/bind_port = 23460\nbind_ip = "127.0.0.1"/' \
+              -e 's/^database = .*/database = "migrate_ci"\nhost = "127.0.0.1"\nport = 5432/' \
+              loc.toml > gw.toml
+          cat >> gw.toml <<EOF
+          [ticket]
+          issuer = "steelnet-eu"
+          campaign = "steelbound-test"
+          public_keys = ["$pub"]
+          [gateway_steelbound]
+          bind = "127.0.0.1:47100"
+          cert = "$gw/server.crt"
+          key = "$gw/server.key"
+          EOF
+          ./target/release/sbcampaign gw.toml > gw.log 2>&1 &
+          SERVER_PID=$!
+          for i in $(seq 1 30); do
+            python3 -c "import socket; socket.create_connection(('127.0.0.1', 47100), 1).close()" 2>/dev/null && break
+            sleep 1
+          done
+          grep -q "SPKI pin $pin" gw.log
+          python3 tools/gateway_client.py --port 47100 --pin "$pin" --key-file "$RUNNER_TEMP/ticket.key" --account 7001 --case all
+          # Wrong pin: nothing is sent, exit code 2.
+          set +e; python3 tools/gateway_client.py --port 47100 --pin "$(printf '0%.0s' $(seq 64))" --case missing; rc=$?; set -e
+          test "$rc" = 2
+          q() { psql -At -d migrate_ci -c "$1"; }
+          test "$(q "SELECT count(*) FROM audit_log a JOIN identity i USING (identity_id) WHERE i.external_id = '7001' AND a.action = 'game_write' AND a.outcome = 'ok'")" = 3
+          test "$(q "SELECT xname FROM accounts a JOIN identity i ON i.player_id = a.xuid WHERE i.external_id = '7001'")" = "Test Pilot"
+          # No account for the fake qwUserID the client reported.
+          test "$(q "SELECT count(*) FROM accounts WHERE xuid = lpad(to_hex(x'0009FFFF0000BEEF'::bigint), 32, '0')::uuid")" = 0
+          # Annul tool (dry run, then apply with suspend): afterwards the gateway refuses the session.
+          echo "migrate_ci steelbound 7001" > "$RUNNER_TEMP/req"
+          REQUEST="$RUNNER_TEMP/req" ANNUL_DATABASES=migrate_ci bash deploy/server/annul.sh | tee annul.log
+          echo "migrate_ci steelbound 7001 apply suspend" > "$RUNNER_TEMP/req"
+          REQUEST="$RUNNER_TEMP/req" ANNUL_DATABASES=migrate_ci bash deploy/server/annul.sh | tee -a annul.log
+          grep -q "suspended=t applied=true" annul.log
+          test ! -e "$RUNNER_TEMP/req"
+          set +e; python3 tools/gateway_client.py --port 47100 --pin "$pin" --key-file "$RUNNER_TEMP/ticket.key" --account 7001 --case valid; rc=$?; set -e
+          test "$rc" = 1
+          kill "$SERVER_PID"
+          cat gw.log
+
       - name: Server log
         if: always()
         run: cat server.log || true
@@ -173,7 +226,7 @@ jobs:
           cp -r sql dist/sbcampaign/sql
           cp -r deploy dist/sbcampaign/deploy
           mkdir -p dist/sbcampaign/tools
-          cp tools/handshake_client.py tools/core_api_client.py tools/steelcore-ca.sh dist/sbcampaign/tools/
+          cp tools/handshake_client.py tools/core_api_client.py tools/steelcore-ca.sh              tools/gateway_client.py tools/gateway-cert.sh dist/sbcampaign/tools/
           echo "${GITHUB_SHA}" > dist/sbcampaign/COMMIT
 
       - uses: actions/upload-artifact@v4
