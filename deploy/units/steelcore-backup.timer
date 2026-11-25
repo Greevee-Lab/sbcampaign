@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=steelcore daily encrypted backup
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=15min
+Persistent=true
+Unit=steelcore-backup.service
+
+[Install]
+WantedBy=timers.target

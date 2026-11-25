@@ -80,6 +80,21 @@ jobs:
           python3 tools/handshake_client.py --xuid 0x0009FFFF00000002 --period
           kill "$SERVER_PID"
 
+      - name: Deploy scripts (syntax) and migrations (twice, idempotent)
+        env:
+          PGHOST: 127.0.0.1
+          PGUSER: sbcampaign
+          PGDATABASE: loc_campaign
+        run: |
+          for f in deploy/deploy.sh deploy/server/*.sh; do bash -n "$f"; done
+          createdb migrate_ci
+          bash deploy/server/migrate.sh migrate_ci sql/fork/test_seed.sql
+          bash deploy/server/migrate.sh migrate_ci sql/fork/test_seed.sql | tee second.log
+          grep -q "migrate_ci: 0 applied" second.log
+          createdb migrate_ci_prod
+          bash deploy/server/migrate.sh migrate_ci_prod sql/fork/preseason.sql
+          test "$(psql -At -d migrate_ci_prod -c 'SELECT count(*) FROM settings')" = 1
+
       - name: Server log
         if: always()
         run: cat server.log || true
@@ -89,6 +104,9 @@ jobs:
           mkdir -p dist/sbcampaign
           cp target/release/sbcampaign loc.toml dist/sbcampaign/
           cp -r sql dist/sbcampaign/sql
+          cp -r deploy dist/sbcampaign/deploy
+          mkdir -p dist/sbcampaign/tools
+          cp tools/handshake_client.py dist/sbcampaign/tools/
           echo "${GITHUB_SHA}" > dist/sbcampaign/COMMIT
 
       - uses: actions/upload-artifact@v4

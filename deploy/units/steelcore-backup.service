@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Installed by the host admin tool from /opt/steelcore/units (deploy/README.md).
+# No User=/Group=/Slice= lines: the host sets them (user steelcore, steelcore.slice).
+#
+# Oneshot (daily timer): encrypted pg_dump to /var/lib/steelcore/backups,
+# 14 days retention. The private key is kept off the server.
+[Unit]
+Description=steelcore encrypted database backup
+After=postgresql.service
+
+[Service]
+Type=oneshot
+Environment="BACKUP_DBS=steelcore steelcore_test"
+Environment=BACKUP_KEEP_DAYS=14
+ExecStart=/bin/bash /opt/steelcore/releases/current/deploy/server/backup.sh
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=192M
+CPUWeight=20
+IOWeight=20
+Nice=15
+
+# Sandbox (the host adds User, Group, Slice, ProtectSystem=strict,
+# ProtectHome, PrivateTmp, NoNewPrivileges and ReadWritePaths on top)
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation
+SystemCallErrorNumber=EPERM
+UMask=0027

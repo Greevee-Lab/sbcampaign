@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Installed by the host admin tool from /opt/steelcore/units (deploy/README.md).
+# No User=/Group=/Slice= lines: the host sets them (user steelcore, steelcore.slice).
+#
+# Oneshot: apply sql/fork/migrations.list of the current release to both
+# databases (idempotent). Started by deploy/server/activate.sh.
+[Unit]
+Description=steelcore database migrations
+After=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/steelcore/releases/current/deploy/server/migrate.sh steelcore sql/fork/preseason.sql
+ExecStart=/bin/bash /opt/steelcore/releases/current/deploy/server/migrate.sh steelcore_test sql/fork/test_seed.sql
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=128M
+Nice=10
+
+# Sandbox (the host adds User, Group, Slice, ProtectSystem=strict,
+# ProtectHome, PrivateTmp, NoNewPrivileges and ReadWritePaths on top)
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation
+SystemCallErrorNumber=EPERM
+UMask=0027

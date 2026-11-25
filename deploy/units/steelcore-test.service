@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Installed by the host admin tool from /opt/steelcore/units (deploy/README.md).
+# No User=/Group=/Slice= lines: the host sets them (user steelcore, steelcore.slice).
+#
+# Test campaign instance: same binary, database steelcore_test (synthetic data
+# only), loopback port 23458. Config: /etc/steelcore/steelcore-test.toml.
+[Unit]
+Description=steelcore test campaign (LoC, database steelcore_test)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=notify
+ExecStart=/opt/steelcore/releases/current/sbcampaign /etc/steelcore/steelcore-test.toml
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryDenyWriteExecute=true
+MemoryHigh=96M
+MemoryMax=128M
+TasksMax=64
+CPUWeight=20
+Nice=10
+
+# Sandbox (the host adds User, Group, Slice, ProtectSystem=strict,
+# ProtectHome, PrivateTmp, NoNewPrivileges and ReadWritePaths on top)
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation
+SystemCallErrorNumber=EPERM
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

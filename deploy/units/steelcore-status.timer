@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=steelcore status collector, every 10 minutes
+
+[Timer]
+OnActiveSec=1min
+OnBootSec=2min
+OnUnitActiveSec=10min
+Unit=steelcore-status.service
+
+[Install]
+WantedBy=timers.target

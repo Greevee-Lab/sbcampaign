@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Ordered list of schema files applied by deploy/server/migrate.sh.
+# Paths are relative to sql/. Applied files are recorded in the table
+# fork_migrations (name, sha256), so a second run changes nothing.
+#
+#   once        applied exactly once; changing the file afterwards is an error
+#               (add a new file instead)
+#   repeatable  applied again whenever the file content changes
+#               (CREATE OR REPLACE procedures)
+#
+# Upstream data migrations (*_migration.sql) are one-off imports from the old
+# MySQL database and are not listed here.
+once        fork/base_schema.sql
+repeatable  set_award_rank.sql
+repeatable  give_turn_award.sql
+repeatable  give_round_award.sql
+repeatable  shop_drop.sql

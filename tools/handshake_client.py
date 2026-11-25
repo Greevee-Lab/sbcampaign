@@ -80,12 +80,16 @@ def expect(sock, wanted):
     return payload
 
 
-def run(host, port, xuid, timeout, period):
+def run(host, port, xuid, timeout, period, ping_only=False):
     with socket.create_connection((host, port), timeout=timeout) as sock:
         sock.settimeout(timeout)
         expect(sock, PING)
         send_frame(sock, PONG)
         expect(sock, XUID_REQ)
+        if ping_only:
+            # Stop before the XUID: the server has not touched the database.
+            print("OK: protocol ping answered")
+            return 0
         send_frame(sock, XUID_RSP, struct.pack("<Q", xuid))
         cmd, _ = recv_frame(sock)
         if cmd != ACCEPT:
@@ -110,9 +114,12 @@ def main():
     ap.add_argument("--timeout", type=float, default=10.0)
     ap.add_argument("--period", action="store_true",
                     help="after the handshake, request the campaign period")
+    ap.add_argument("--ping-only", action="store_true",
+                    help="stop after Ping/Pong and the XUID request (no database access, "
+                         "safe against a production server)")
     args = ap.parse_args()
     try:
-        return run(args.host, args.port, args.xuid, args.timeout, args.period)
+        return run(args.host, args.port, args.xuid, args.timeout, args.period, args.ping_only)
     except (OSError, ConnectionError) as err:
         print("NETWORK ERROR: %s" % err)
         return 2
