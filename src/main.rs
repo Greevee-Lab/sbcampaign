@@ -36,9 +36,10 @@ pub mod client;
 pub mod command;
 pub mod service;
 
-// Fork additions (steelcore): core boundary and its implementation.
+// Fork additions (steelcore): core boundary, its implementation, sign-in tickets.
 pub mod campaign_core;
 pub mod core_api;
+pub mod ticket;
 
 use crate::command::VTID;
 use sqlx::{

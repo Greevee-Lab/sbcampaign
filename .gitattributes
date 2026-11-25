@@ -4,3 +4,4 @@
 *.sql text eol=lf
 *.list text eol=lf
 *.example text eol=lf
+testdata/*.toml text eol=lf

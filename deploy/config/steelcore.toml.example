@@ -40,3 +40,15 @@ username = "steelcore"
 socket = "/var/run/postgresql"
 app_name = "steelcore"
 database = "steelcore"
+
+[ticket]
+# Sign-in tickets of the Steelbound gateway (src/ticket). The issuer's
+# public Ed25519 keys, 64 hex digits each (steelnet: `python -m
+# steelnet.ticket pubkey <key file>`). Several keys = rotation: add the new
+# key, switch the issuer, remove the old key after the ticket lifetime.
+# Never put a private key here. Empty = the gateway refuses to start.
+issuer = "steelnet-eu"
+campaign = "steelbound-s1"
+public_keys = []
+max_clock_skew = 60
+max_lifetime = 3600
