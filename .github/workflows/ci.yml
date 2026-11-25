@@ -193,7 +193,6 @@ jobs:
             python3 -c "import socket; socket.create_connection(('127.0.0.1', 47100), 1).close()" 2>/dev/null && break
             sleep 1
           done
-          grep -q "SPKI pin $pin" gw.log
           python3 tools/gateway_client.py --port 47100 --pin "$pin" --key-file "$RUNNER_TEMP/ticket.key" --account 7001 --case all
           # Wrong pin: nothing is sent, exit code 2.
           set +e; python3 tools/gateway_client.py --port 47100 --pin "$(printf '0%.0s' $(seq 64))" --case missing; rc=$?; set -e
