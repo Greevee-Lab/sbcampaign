@@ -270,7 +270,8 @@ tcp` (47103 for the test instance).
 **Test from outside** (synthetic account ids only):
 
 ```sh
-python3 tools/gateway_client.py --host <server> --port 47103 --pin <pin> \n    --key-file ~/.steelcore/ticket-test.key --account 900001 --case all
+python3 tools/gateway_client.py --host <server> --port 47103 --pin <pin> \
+    --key-file ~/.steelcore/ticket-test.key --account 900001 --case all
 ```
 
 `valid` registers, loads and saves a pilot and chooses a faction (reporting a
