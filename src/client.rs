@@ -14,11 +14,12 @@ macro_rules! client_log {
 }
 
 use crate::command::{self, rx::RxCommand, tx::TxCommand};
+use crate::core_api::transport::BoxedTransport;
 use futures::sink::SinkExt;
 use std::{fmt, net::SocketAddr, time::Duration};
 use thiserror::Error;
 use tokio::{
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     time::timeout,
 };
 use tokio_stream::StreamExt;
@@ -66,8 +67,8 @@ impl fmt::Display for Language {
 }
 
 pub struct Client {
-    codec: Framed<TcpStream, command::CampaignCodec>,
-    session_id: SessionID,
+    pub(crate) codec: Framed<BoxedTransport, command::CampaignCodec>,
+    pub(crate) session_id: SessionID,
 
     pub xuid: Uuid,
     pub xname: String,
@@ -350,7 +351,7 @@ async fn main_inner(client: &mut Client) -> Result<(), ClientError> {
 }
 
 async fn main(
-    codec: Framed<TcpStream, command::CampaignCodec>,
+    codec: Framed<BoxedTransport, command::CampaignCodec>,
     addr: SocketAddr,
     session_id: SessionID,
 ) {
@@ -429,7 +430,7 @@ pub async fn listener(listener: TcpListener, cancel_token: CancellationToken) {
         };
 
         // Spawn a new task to handle the connection concurrently
-        let codec = Framed::new(socket, command::CampaignCodec);
+        let codec = Framed::new(Box::new(socket) as BoxedTransport, command::CampaignCodec);
         tracker.spawn(main(codec, addr, session_id));
 
         session_id = session_id.wrapping_add(1);

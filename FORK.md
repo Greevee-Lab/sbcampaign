@@ -49,10 +49,40 @@ of the campaign core of [steelcore](https://github.com/Greevee-Lab/steelcore).
 | Handshake test client | `tools/handshake_client.py` | possibly |
 | CI: build, test, handshake test, artifact | `.github/workflows/ci.yml` | no |
 | Fork documentation | `README.md`, `FORK.md` | no |
+| Players and identities: tables `provider`, `player`, `identity`, `audit_log`; backfill of existing accounts (ADR-0002) | `sql/fork/identity.sql`, `sql/fork/migrations.list`, `tools/test_identity_backfill.sh` | no |
+| Core boundary: trait `CampaignCore` with every campaign operation, dispatcher for the original protocol, no database access outside the core (ADR-0001, enforced by a test) | `src/core_api/` | no |
+| Campaign core: adapter that puts the upstream commands behind `CampaignCore`, identity resolution | `src/campaign_core/` | no |
+| Hook: the client stream is boxed (`BoxedTransport`) so the protocol code also runs over TLS or in tests; `codec`/`session_id` visible in the crate; module declarations | `src/client.rs`, `src/main.rs` | no |
+| CI: database tests against a migrated test database, identity backfill check | `.github/workflows/ci.yml` | no |
+
+## Players, identities and the core boundary
+
+Following the [steelcore concept](https://github.com/Greevee-Lab/steelcore/blob/main/docs/concept.md):
+
+- **Player and identity** ([ADR-0002](https://github.com/Greevee-Lab/steelcore/blob/main/docs/adr/0002-player-id-from-existing-uuid.md)).
+  A player owns pilot, garage, awards and leaderboard rows. An identity is one
+  provider account, `(provider, external_id)`, unique. The `player_id` is the
+  existing account UUID, so no campaign row changes:
+  - `insignia`: the XUID as UUID, exactly as the handshake derives it
+    (`Uuid::from_u64_pair(0, xuid)`, in SQL `lpad(to_hex(xuid), 32, '0')::uuid`).
+    Prepared, disabled until a gateway uses it.
+  - `steelbound`: the account id `n` becomes the pseudo-XUID `0x53424C01_nnnnnnnn`
+    ("SBL", version 1), then the same derivation. Real XUIDs start with
+    `0x0009` or `0xE000`, so the ranges never overlap.
+- **Core boundary** ([ADR-0001](https://github.com/Greevee-Lab/steelcore/blob/main/docs/adr/0001-core-api-only.md)).
+  `src/core_api/` defines the trait `CampaignCore` with every campaign
+  operation, grouped like the original protocol, and a dispatcher from
+  received commands to core calls. `src/campaign_core/` implements it: the
+  campaign commands delegate to the unchanged upstream code; identity
+  resolution (`resolve_identity`, which creates player and identity on first
+  contact and writes an audit row) is new. In this version the boundary is an
+  in-process Rust trait; a network API can expose the same calls later.
+- **Rule:** new code outside `src/campaign_core/` never touches the database.
+  The test `core_api::rules::new_code_has_no_sql` fails on database access in
+  any source file that is neither upstream nor part of the core. When upstream
+  adds a source file, add it to the list in `src/core_api/rules.rs`.
 
 ## Planned additions
 
-Following the steelcore concept, new modules will be added here for player
-identity, the core boundary (gateways never touch the database directly) and
-a gateway for Steelbound players. They are developed as separate modules on
-top of the upstream campaign logic.
+A gateway for Steelbound players (signed sign-in ticket, TLS listener next to
+the upstream listener) built on the core boundary.

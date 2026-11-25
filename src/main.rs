@@ -36,6 +36,10 @@ pub mod client;
 pub mod command;
 pub mod service;
 
+// Fork additions (steelcore): core boundary and its implementation.
+pub mod campaign_core;
+pub mod core_api;
+
 use crate::command::VTID;
 use sqlx::{
     PgPool,

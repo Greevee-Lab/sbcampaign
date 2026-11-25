@@ -41,6 +41,15 @@ cargo build --no-default-features
 cargo test --no-default-features
 ```
 
+Database tests (players, identities, the core boundary) run against a test
+database with the full schema; without it they are skipped:
+
+```sh
+createdb core_test && bash deploy/server/migrate.sh core_test sql/fork/test_seed.sql
+SBCAMPAIGN_TEST_DATABASE_URL=postgres://sbcampaign@127.0.0.1/core_test \
+  cargo test --no-default-features
+```
+
 CI builds a release binary on every push and pull request, runs the tests,
 plays a handshake against a test database and uploads the binary together
 with `sql/` as an artifact.

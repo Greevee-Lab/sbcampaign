@@ -95,6 +95,19 @@ jobs:
           bash deploy/server/migrate.sh migrate_ci_prod sql/fork/preseason.sql
           test "$(psql -At -d migrate_ci_prod -c 'SELECT count(*) FROM settings')" = 1
 
+      - name: Database tests (identity, core boundary) and identity backfill
+        env:
+          PGHOST: 127.0.0.1
+          PGUSER: sbcampaign
+          PGDATABASE: loc_campaign
+          SBCAMPAIGN_TEST_DATABASE_URL: postgres://sbcampaign@127.0.0.1:5432/migrate_ci
+          SBCAMPAIGN_REQUIRE_DB_TESTS: "1"
+        run: |
+          cargo test --release --locked campaign_core 2>&1 | tee dbtest.log
+          grep -q "db_steelbound_player_through_the_core ... ok" dbtest.log
+          createdb backfill_ci
+          bash tools/test_identity_backfill.sh backfill_ci
+
       - name: Server log
         if: always()
         run: cat server.log || true
