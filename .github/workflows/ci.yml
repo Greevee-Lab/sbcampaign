@@ -109,6 +109,7 @@ jobs:
           grep -q "db_core_api_idempotency_and_audit ... ok" dbtest.log
           grep -q "db_gateway_pilot_session ... ok" dbtest.log
           grep -q "db_gateway_results_plausibility_annul ... ok" dbtest.log
+          grep -q "db_new_pilot_can_buy_a_starting_vt ... ok" dbtest.log
           createdb backfill_ci
           bash tools/test_identity_backfill.sh backfill_ci
 

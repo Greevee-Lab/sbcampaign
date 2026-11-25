@@ -18,6 +18,8 @@ mod tests;
 mod profile_tests;
 #[cfg(test)]
 mod gateway_tests;
+#[cfg(test)]
+mod shop_tests;
 
 use crate::{
     client::{Client, ClientError, Faction, Language},

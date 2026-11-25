@@ -57,6 +57,7 @@ of the campaign core of [steelcore](https://github.com/Greevee-Lab/steelcore).
 | Core API `steelcore.v1`: Protobuf contract, gRPC and Connect-JSON bindings on one mutual-TLS listener (`[core_api]`), provider accesses with scopes, rate limit, idempotency keys, write audit; display names (gamertag rules, look-alike check, blocklist, change limit, reservation); identity suspension; `ProfileCore` boundary with PostgreSQL store | `proto/`, `build.rs`, `src/core_api/names.rs`, `src/core_api/profile.rs`, `src/core_api/net/`, `src/campaign_core/profile.rs`, `sql/fork/core_api.sql`, `tools/steelcore-ca.sh`, `tools/core_api_client.py`, `src/main.rs` (start the listener), `Cargo.toml` | no |
 | Sign-in tickets: verification of Ed25519 tickets from an identity provider (signature, issuer, campaign, lifetime, key rotation), `[ticket]` configuration section, shared test vectors from the issuer | `src/ticket/`, `testdata/`, `deploy/config/*.example`, `Cargo.toml` (`ed25519-dalek`) | no |
 | Steelbound gateway: public TLS listener (`[gateway_steelbound]`), prelude with the sign-in ticket, then the unchanged original protocol for the identity from the ticket (reported `qwUserID` ignored); rate limits per source and identity, connection and time limits, plausibility bounds for results, audit row per write, results ledger and annulment per identity; `GatewayCore` boundary; suspended identities refused in `open_session` | `src/gateway_steelbound/`, `src/core_api/gateway.rs`, `src/campaign_core/gateway.rs`, `src/campaign_core/identity.rs`, `sql/fork/gateway.sql`, `sql/fork/gateway_annul.sql`, `deploy/server/annul.sh`, `deploy/units/steelcore-annul.service`, `tools/gateway_client.py`, `tools/gateway-cert.sh`, `src/main.rs` (start the listener) | no |
+| Shop catalog: the 31 VT types of the reinforcement shop (faction, cost, limit, turn of release) as a `once` migration with full stock and serials from 1; without it a new pilot cannot buy a VT and MISSION SELECT stays disabled. Upstream fills `shop` with a one-off import from its old database (`sql/shop_migration.sql`) | `sql/fork/shop_catalog.sql`, `sql/fork/migrations.list`, `src/campaign_core/shop_tests.rs` | maybe: a seed file for new installs (see below) |
 
 ## Players, identities and the core boundary
 
@@ -222,3 +223,27 @@ and with a database: pilot register/load/save and faction through the
 gateway with a foreign `qwUserID`, audit rows, results ledger, annulment and
 the suspended identity being refused. `tools/gateway_client.py` runs the same
 cases against a running server (CI does this against the release binary).
+
+## Shop catalog
+
+A fresh database has an empty `shop` table, because upstream imports the
+catalog once from its old MySQL database (`sql/shop_migration.sql`, not in
+the migration list). The game then receives an empty ShopList (0x2041): a
+new pilot owns no VT and cannot buy one, so MISSION SELECT stays disabled.
+With an empty garage *and* an empty shop the game also loops forever when
+the player moves the cursor in the Reinforcements screen (it searches the
+next set bit of an empty selection mask).
+
+`sql/fork/shop_catalog.sql` inserts the same 31 rows (`ON CONFLICT DO
+NOTHING`) with `vtstock = vtlimit` and serial numbers from 1. A new pilot
+starts with VT points from the pilot data and buys the first VTs in the
+shop; in turn 1 HSD gets Vitzh and Vortex, PRF Decider (unlimited) and
+Falchion (limited). Guerrilla (RB) and Jaralaccs VTs are released from turn 3
+and 5, so pilots of those factions have nothing to buy before that.
+
+Wire format checked by `db_new_pilot_can_buy_a_starting_vt`: `u8 status,
+u16 count`, then per entry `u16 type, u32 limit, u16 cost, u8 pad`
+(limit `0xFFFFFFFF` = unlimited; the game hides entries with limit 0).
+
+Note for upstream: a new installation needs this catalog as a seed; a
+small `sql/shop_seed.sql` would let others run the server from scratch.

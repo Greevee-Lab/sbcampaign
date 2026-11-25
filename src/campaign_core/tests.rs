@@ -225,13 +225,13 @@ async fn db_disabled_and_invalid_are_refused() {
     assert!(matches!(r, Err(IdentityError::InvalidExternalId { .. })));
 }
 
-fn synthetic_pilot(name: &str) -> PilotData {
+pub(super) fn synthetic_pilot(name: &str) -> PilotData {
     let mut data: PilotData = [0; _];
     data[40..40 + name.len()].copy_from_slice(name.as_bytes());
     data
 }
 
-fn session(transport: BoxedTransport) -> Client {
+pub(super) fn session(transport: BoxedTransport) -> Client {
     Client {
         codec: Framed::new(transport, command::CampaignCodec),
         session_id: 0,

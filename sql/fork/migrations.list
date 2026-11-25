@@ -20,3 +20,4 @@ once        fork/identity.sql
 once        fork/core_api.sql
 once        fork/gateway.sql
 repeatable  fork/gateway_annul.sql
+once        fork/shop_catalog.sql
