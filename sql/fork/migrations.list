@@ -17,3 +17,4 @@ repeatable  give_turn_award.sql
 repeatable  give_round_award.sql
 repeatable  shop_drop.sql
 once        fork/identity.sql
+once        fork/core_api.sql

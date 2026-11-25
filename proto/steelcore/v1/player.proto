@@ -1,0 +1,100 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// steelcore.v1 – players and display names.
+//
+// The display name is the player's name in campaign, leaderboards and
+// matchmaking. It follows the classic gamertag rules and is unique across
+// all providers. Look-alike names (case, I/l/1, O/0, rn/m, vv/w, spaces) count
+// as taken.
+syntax = "proto3";
+
+package steelcore.v1;
+
+service PlayerService {
+  // Public profile of a player. Scope: read:public.
+  rpc GetPlayer(GetPlayerRequest) returns (GetPlayerResponse);
+  // Would this name be accepted? Changes nothing. Scope: read:public.
+  rpc CheckDisplayName(CheckDisplayNameRequest) returns (CheckDisplayNameResponse);
+  // Set or change the display name of a player of the calling provider.
+  // Scope: profile:write. Idempotency key required.
+  rpc SetDisplayName(SetDisplayNameRequest) returns (SetDisplayNameResponse);
+}
+
+message Player {
+  string player_id = 1;
+  // Empty if none is set yet.
+  string display_name = 2;
+  // Unix seconds of the last display name change; 0 if never set.
+  int64 display_name_changed_at = 3;
+  // Unix seconds from which the name may be changed again; 0 = now.
+  int64 next_display_name_change_at = 4;
+  // External ids of this player at the calling provider. Identities at other
+  // providers are never shown to a provider.
+  repeated string external_ids = 5;
+}
+
+message GetPlayerRequest {
+  string player_id = 1;
+}
+
+message GetPlayerResponse {
+  Player player = 1;
+}
+
+// Why a name is or is not accepted.
+enum DisplayNameStatus {
+  DISPLAY_NAME_STATUS_UNSPECIFIED = 0;
+  // Valid and available.
+  DISPLAY_NAME_STATUS_OK = 1;
+  // Not 1..15 characters.
+  DISPLAY_NAME_STATUS_INVALID_LENGTH = 2;
+  // Only letters A-Z a-z, digits and single spaces; must start with a letter,
+  // no space at the start or end, never two spaces in a row.
+  DISPLAY_NAME_STATUS_INVALID_CHARACTERS = 3;
+  // Another player uses this name.
+  DISPLAY_NAME_STATUS_TAKEN = 4;
+  // Another player uses or holds a look-alike name.
+  DISPLAY_NAME_STATUS_SIMILAR = 5;
+  // Recently given up by another player and still reserved for them.
+  DISPLAY_NAME_STATUS_RESERVED = 6;
+  // Not allowed (reserved or blocked word).
+  DISPLAY_NAME_STATUS_BLOCKED = 7;
+  // The player changed the name recently; see next_change_at.
+  DISPLAY_NAME_STATUS_CHANGE_LIMIT = 8;
+  // The player already has exactly this name.
+  DISPLAY_NAME_STATUS_UNCHANGED = 9;
+}
+
+message CheckDisplayNameRequest {
+  string name = 1;
+  // Optional: check on behalf of this player, so the player's own current or
+  // reserved name counts as available and the change limit is reported.
+  string player_id = 2;
+}
+
+message CheckDisplayNameResponse {
+  // Syntax rules passed.
+  bool valid = 1;
+  // valid and nobody else has, holds or blocks the name.
+  bool available = 2;
+  DisplayNameStatus status = 3;
+  // For CHANGE_LIMIT: unix seconds when the next change is allowed.
+  int64 next_change_at = 4;
+}
+
+message SetDisplayNameRequest {
+  string player_id = 1;
+  string name = 2;
+  // Required. 8..64 characters of A-Z a-z 0-9 _ -.
+  string idempotency_key = 3;
+}
+
+message SetDisplayNameResponse {
+  // DISPLAY_NAME_STATUS_OK if the name was set; otherwise why not (nothing
+  // changed). UNCHANGED is not an error: the player keeps the name.
+  DisplayNameStatus status = 1;
+  // The player after the call.
+  Player player = 2;
+  // For CHANGE_LIMIT: unix seconds when the next change is allowed.
+  int64 next_change_at = 3;
+}

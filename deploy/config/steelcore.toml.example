@@ -52,3 +52,31 @@ campaign = "steelbound-s1"
 public_keys = []
 max_clock_skew = 60
 max_lifetime = 3600
+
+[core_api]
+# Network Core API steelcore.v1 (gRPC + Connect-JSON over mutual TLS 1.3).
+# Remove the section (or set enabled = false) to run without it.
+enabled = false
+# Loopback only: the provider runs on the same host.
+bind = "127.0.0.1:47101"
+cert = "/etc/steelcore/core-api/server.crt"
+key = "/etc/steelcore/core-api/server.key"
+# CA that issues the client certificates (tools/steelcore-ca.sh).
+client_ca = "/etc/steelcore/core-api/ca.crt"
+display_name_change_days = 7
+display_name_reservation_days = 30
+max_connections = 64
+
+# One entry per provider access. cert_sha256 = SHA-256 of the client
+# certificate (tools/steelcore-ca.sh fingerprint <cert>). Scopes:
+#   identity:write  ResolveIdentity for the access's provider
+#   profile:write   SetDisplayName for players of that provider
+#   read:public     GetPlayer, CheckDisplayName
+#   admin           AdminService (no provider)
+[[core_api.access]]
+name = "steelnet-eu"
+provider = "steelbound"
+cert_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+scopes = ["identity:write", "profile:write", "read:public"]
+rate_per_second = 20
+burst = 40

@@ -18,6 +18,7 @@ script takes the ssh target from the environment.
 | `/opt/steelcore/units/` | unit files, installed by the admin tool | deploy user |
 | `/etc/steelcore/steelcore.toml` | production config (database `steelcore`, port 23457) | deploy user, service |
 | `/etc/steelcore/steelcore-test.toml` | test config (database `steelcore_test`, port 23458) | deploy user, service |
+| `/etc/steelcore/core-api/` | Core API TLS: `ca.crt`, `server.crt`, `server.key` (0640) | deploy user, service |
 | `/etc/steelcore/backup-pubkey.asc` | OpenPGP public key for backups | deploy user |
 | `/etc/steelcore/restore/` | drop folder for a decrypted dump (normally empty) | deploy user, service |
 | `/var/lib/steelcore/backups/` | encrypted backups (`<db>-<UTC time>.dump.gpg`) | service |
@@ -176,6 +177,47 @@ only, a protocol ping on the main service (`tools/handshake_client.py
 handshake with the period request on the test instance, the collected database
 status (at most 30 minutes old) and the age of the newest backup (at most 26
 hours). Prints `ok`, or `FAIL` with exit code 1.
+
+## Core API
+
+The network Core API (`steelcore.v1`, see `FORK.md`) starts only if the config
+has a `[core_api]` section. It listens on loopback only (production
+`127.0.0.1:47101`, test `127.0.0.1:47102`); the units additionally allow only
+localhost. A public port follows only when a provider on another host is
+connected.
+
+**Certificates** (on the operator's machine; the CA key never goes to a server):
+
+```sh
+tools/steelcore-ca.sh init   ~/.steelcore/core-api-ca
+tools/steelcore-ca.sh server ~/.steelcore/core-api-ca core-api-server
+tools/steelcore-ca.sh client ~/.steelcore/core-api-ca steelnet-eu      # prints cert_sha256
+```
+
+Copy `ca.crt`, `core-api-server.crt` and `core-api-server.key` to
+`/etc/steelcore/core-api/` as `ca.crt`, `server.crt`, `server.key` (mode 0640,
+group `steelcore`). The provider gets its own `<access>.crt`/`.key` plus
+`ca.crt`, and its fingerprint goes into `[[core_api.access]]` with the scopes
+it needs (see the config examples). Restart the service after config changes.
+
+- **Renew** (client certificates default to 397 days, server 825): issue a
+  new certificate, add its fingerprint as a second access (other name),
+  restart, switch the provider, remove the old access, restart.
+- **Revoke:** remove the access and restart. Revoked accesses stay in the
+  table `api_access` with `revoked_at` (audit rows keep their name).
+- **Server certificate:** replace the files and restart; providers trust the
+  CA, not the certificate.
+- **Lost or leaked CA key:** create a new CA, reissue all certificates,
+  replace `ca.crt` on both sides.
+
+Smoke test on the server (as a user who can read the provider key):
+
+```sh
+python3 tools/core_api_client.py --port 47102 --ca ca.crt --cert steelnet-test.crt --key steelnet-test.key \
+    steelcore.v1.PlayerService/CheckDisplayName '{"name": "Test Pilot"}'
+```
+
+Audit: `SELECT at, access_id, method, outcome FROM audit_log WHERE access_id IS NOT NULL ORDER BY at DESC LIMIT 20;`
 
 ## Campaign off (emergency)
 

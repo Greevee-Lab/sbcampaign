@@ -213,6 +213,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Launch the listener task to accept new clients
     let client_listener_handle = tokio::spawn(client::listener(listener, cancel_token.clone()));
 
+    // Fork: network Core API (steelcore.v1), only if [core_api] is configured.
+    let core_api_handle = core_api::net::server::start(
+        &root_config,
+        std::sync::Arc::new(campaign_core::SbCampaignCore::new(get_pool().clone())),
+        cancel_token.clone(),
+    )
+    .await?;
+
     #[cfg(feature = "journal")]
     if !notify([(STATE_READY, "1"), (STATE_STATUS, "Running")].iter())? {
         eprintln!("Failed to contact SystemD service for Ready");
@@ -228,6 +236,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cancel_token.cancel();
 
     let _ = join!(service_handle, client_listener_handle);
+    if let Some(handle) = core_api_handle {
+        let _ = handle.await;
+    }
     return Ok(());
 }
 

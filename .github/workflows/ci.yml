@@ -105,8 +105,63 @@ jobs:
         run: |
           cargo test --release --locked campaign_core 2>&1 | tee dbtest.log
           grep -q "db_steelbound_player_through_the_core ... ok" dbtest.log
+          grep -q "db_core_api_display_names ... ok" dbtest.log
+          grep -q "db_core_api_idempotency_and_audit ... ok" dbtest.log
           createdb backfill_ci
           bash tools/test_identity_backfill.sh backfill_ci
+
+      - name: Core API (mutual TLS) against the release binary
+        env:
+          PGHOST: 127.0.0.1
+          PGUSER: sbcampaign
+        run: |
+          ca=$RUNNER_TEMP/ca; other=$RUNNER_TEMP/other-ca
+          bash tools/steelcore-ca.sh init "$ca"
+          bash tools/steelcore-ca.sh server "$ca" core-api-server
+          bash tools/steelcore-ca.sh client "$ca" steelnet-ci
+          bash tools/steelcore-ca.sh client "$ca" stats-ci
+          bash tools/steelcore-ca.sh client "$ca" unregistered-ci
+          bash tools/steelcore-ca.sh init "$other"
+          bash tools/steelcore-ca.sh client "$other" steelnet-ci
+          sed -e 's/^bind_port = .*/bind_port = 23459
+bind_ip = "127.0.0.1"/'               -e 's/^database = .*/database = "migrate_ci"
+host = "127.0.0.1"
+port = 5432/'               loc.toml > core.toml
+          cat >> core.toml <<EOF
+          [core_api]
+          bind = "127.0.0.1:47101"
+          cert = "$ca/core-api-server.crt"
+          key = "$ca/core-api-server.key"
+          client_ca = "$ca/ca.crt"
+          [[core_api.access]]
+          name = "steelnet-ci"
+          provider = "steelbound"
+          cert_sha256 = "$(bash tools/steelcore-ca.sh fingerprint "$ca/steelnet-ci.crt")"
+          scopes = ["identity:write", "profile:write", "read:public"]
+          [[core_api.access]]
+          name = "stats-ci"
+          cert_sha256 = "$(bash tools/steelcore-ca.sh fingerprint "$ca/stats-ci.crt")"
+          scopes = ["read:public"]
+          EOF
+          ./target/release/sbcampaign core.toml > core.log 2>&1 &
+          SERVER_PID=$!
+          for i in $(seq 1 30); do
+            python3 -c "import socket; socket.create_connection(('127.0.0.1', 47101), 1).close()" 2>/dev/null && break
+            sleep 1
+          done
+          c() { python3 tools/core_api_client.py --port 47101 --ca "$ca/ca.crt" "$@"; }
+          sn=(--cert "$ca/steelnet-ci.crt" --key "$ca/steelnet-ci.key")
+          c "${sn[@]}" steelcore.v1.IdentityService/ResolveIdentity '{"externalId": "4242"}'
+          c "${sn[@]}" steelcore.v1.PlayerService/SetDisplayName             '{"playerId": "00000000-0000-0000-5342-4c0100001092", "name": "Ci Pilot", "idempotencyKey": "ci-key-0001"}'
+          c "${sn[@]}" steelcore.v1.PlayerService/CheckDisplayName '{"name": "Ci P1lot"}' | grep -q SIMILAR
+          c --cert "$ca/stats-ci.crt" --key "$ca/stats-ci.key" --expect permission_denied             steelcore.v1.IdentityService/ResolveIdentity '{"externalId": "4243"}'
+          c --cert "$ca/unregistered-ci.crt" --key "$ca/unregistered-ci.key" --expect unauthenticated             steelcore.v1.PlayerService/GetPlayer '{"playerId": "00000000-0000-0000-5342-4c0100001092"}'
+          c --cert "$other/steelnet-ci.crt" --key "$other/steelnet-ci.key" --expect tls             steelcore.v1.PlayerService/GetPlayer '{"playerId": "00000000-0000-0000-5342-4c0100001092"}'
+          c --expect tls steelcore.v1.PlayerService/GetPlayer '{"playerId": "00000000-0000-0000-5342-4c0100001092"}'
+          test "$(psql -At -d migrate_ci -c "SELECT count(*) FROM audit_log WHERE access_id = 'steelnet-ci'")" = 2
+          test "$(psql -At -d migrate_ci -c "SELECT count(*) FROM audit_log WHERE access_id = 'stats-ci' AND outcome = 'permission_denied'")" = 1
+          kill "$SERVER_PID"
+          cat core.log
 
       - name: Server log
         if: always()
@@ -119,7 +174,7 @@ jobs:
           cp -r sql dist/sbcampaign/sql
           cp -r deploy dist/sbcampaign/deploy
           mkdir -p dist/sbcampaign/tools
-          cp tools/handshake_client.py dist/sbcampaign/tools/
+          cp tools/handshake_client.py tools/core_api_client.py tools/steelcore-ca.sh dist/sbcampaign/tools/
           echo "${GITHUB_SHA}" > dist/sbcampaign/COMMIT
 
       - uses: actions/upload-artifact@v4

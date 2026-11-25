@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// steelcore.v1 – identities.
+//
+// Every caller is a provider access, authenticated by its client certificate
+// (mutual TLS). The provider of an identity always comes from that access,
+// never from a request field, so a provider can only act for its own users.
+syntax = "proto3";
+
+package steelcore.v1;
+
+// Maps a provider's own user to a campaign player.
+service IdentityService {
+  // Find the player behind one user of the calling provider. On first contact
+  // a new player and the identity are created. Scope: identity:write.
+  rpc ResolveIdentity(ResolveIdentityRequest) returns (ResolveIdentityResponse);
+}
+
+message ResolveIdentityRequest {
+  // The user's id at the calling provider, for example a Steelbound account
+  // id in decimal ("42"). The provider itself is taken from the certificate.
+  string external_id = 1;
+  // Optional for this call (it is naturally idempotent). If set, a repeated
+  // call with the same key returns the first response unchanged.
+  // 8..64 characters of A-Z a-z 0-9 _ -.
+  string idempotency_key = 2;
+}
+
+message ResolveIdentityResponse {
+  // Campaign player, a UUID in canonical text form.
+  string player_id = 1;
+  // This identity, a UUID in canonical text form.
+  string identity_id = 2;
+  // Canonical form of the external id.
+  string external_id = 3;
+  // True if this call created the identity (and possibly the player).
+  bool created = 4;
+  // Current display name of the player; empty if none is set yet.
+  string display_name = 5;
+  // A suspended identity may not play. The provider must refuse the session.
+  bool suspended = 6;
+}

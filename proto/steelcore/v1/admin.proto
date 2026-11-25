@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// steelcore.v1 – administration. Only accesses with the admin scope.
+syntax = "proto3";
+
+package steelcore.v1;
+
+service AdminService {
+  // Suspend or reinstate one identity of any provider. A suspended identity
+  // is reported as suspended by ResolveIdentity. Scope: admin.
+  // Idempotency key required.
+  rpc SetIdentitySuspended(SetIdentitySuspendedRequest) returns (SetIdentitySuspendedResponse);
+}
+
+message SetIdentitySuspendedRequest {
+  // Provider id, for example "steelbound" or "insignia".
+  string provider = 1;
+  string external_id = 2;
+  bool suspended = 3;
+  string idempotency_key = 4;
+}
+
+message SetIdentitySuspendedResponse {
+  string identity_id = 1;
+  string player_id = 2;
+  bool suspended = 3;
+}

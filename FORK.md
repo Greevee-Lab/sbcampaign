@@ -54,6 +54,7 @@ of the campaign core of [steelcore](https://github.com/Greevee-Lab/steelcore).
 | Campaign core: adapter that puts the upstream commands behind `CampaignCore`, identity resolution | `src/campaign_core/` | no |
 | Hook: the client stream is boxed (`BoxedTransport`) so the protocol code also runs over TLS or in tests; `codec`/`session_id` visible in the crate; module declarations | `src/client.rs`, `src/main.rs` | no |
 | CI: database tests against a migrated test database, identity backfill check | `.github/workflows/ci.yml` | no |
+| Core API `steelcore.v1`: Protobuf contract, gRPC and Connect-JSON bindings on one mutual-TLS listener (`[core_api]`), provider accesses with scopes, rate limit, idempotency keys, write audit; display names (gamertag rules, look-alike check, blocklist, change limit, reservation); identity suspension; `ProfileCore` boundary with PostgreSQL store | `proto/`, `build.rs`, `src/core_api/names.rs`, `src/core_api/profile.rs`, `src/core_api/net/`, `src/campaign_core/profile.rs`, `sql/fork/core_api.sql`, `tools/steelcore-ca.sh`, `tools/core_api_client.py`, `src/main.rs` (start the listener), `Cargo.toml` | no |
 | Sign-in tickets: verification of Ed25519 tickets from an identity provider (signature, issuer, campaign, lifetime, key rotation), `[ticket]` configuration section, shared test vectors from the issuer | `src/ticket/`, `testdata/`, `deploy/config/*.example`, `Cargo.toml` (`ed25519-dalek`) | no |
 
 ## Players, identities and the core boundary
@@ -114,6 +115,44 @@ for a player with a **ticket** instead (steelcore concept, trust model):
 - **Crate:** `ed25519-dalek` 2.x (pure Rust, part of the widely reviewed
   dalek-cryptography project, `verify_strict`, no OpenSSL or C toolchain
   needed on Linux or Windows).
+
+## Core API (steelcore.v1)
+
+Every provider – Steelbound's steelnet today, other clients later – reaches
+players, identities and display names only through one versioned network API
+(steelcore ADR-0001, ADR-0007). Nobody gets a database login or a private
+shortcut.
+
+- **Contract:** `proto/steelcore/v1/*.proto` is the single source of truth
+  (`IdentityService`, `PlayerService`, `AdminService`, see `proto/README.md`).
+  Campaign commands stay in-process for now (`CampaignCore`) and can be added
+  later as further services in the same package. `build.rs` generates the
+  code with `protox` (no `protoc` needed), `tonic`/`prost` and `pbjson`.
+- **Two bindings, one listener:** gRPC (HTTP/2) and Connect-JSON
+  (`POST /steelcore.v1.<Service>/<Method>`, `application/json`, proto3 JSON
+  mapping). Both call the same functions in `src/core_api/net/service.rs`;
+  a test runs the same call sequence through both and requires identical
+  results. Clients that should stay dependency-free (Python standard
+  library) use Connect-JSON.
+- **Mutual TLS 1.3:** the server only accepts client certificates of its own
+  CA (`tools/steelcore-ca.sh`), and the certificate's SHA-256 fingerprint
+  must be listed as an access in `[core_api]`. An access has a provider (or
+  none, for read-only or admin tools), scopes (`identity:write`,
+  `profile:write`, `read:public`, `admin`) and a rate limit. The provider
+  of an identity always comes from the access, never from the request.
+- **Writes** carry an idempotency key (required for `SetDisplayName` and
+  admin calls, optional for the naturally idempotent `ResolveIdentity`); a
+  repeated key returns the first response, a reused key with another
+  request is refused. Every write of a known access, refused or not, leaves
+  one audit row (access, provider, method, identity/player, outcome) – never
+  request contents.
+- **Display names** belong to the player, not to a provider: unique across
+  providers, classic gamertag rules (1–15 characters, letters, digits,
+  single spaces, starting with a letter), look-alike check (case, I/l/1,
+  O/0, rn/m, vv/w, spaces), blocklist table, one change per 7 days, the old
+  name stays reserved for its owner for 30 days (both configurable).
+  A provider may only rename players it has an identity for.
+- **Operation:** `deploy/README.md`, section "Core API".
 
 ## Planned additions
 

@@ -23,6 +23,9 @@
 #![allow(dead_code)] // Called by the Steelbound gateway, which is the next step.
 
 pub mod dispatch;
+pub mod names;
+pub mod profile;
+pub mod net;
 pub mod transport;
 
 #[cfg(test)]

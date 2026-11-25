@@ -63,7 +63,7 @@ fn provider_ranges_never_collide() {
 
 // ---- Database -----------------------------------------------------------
 
-async fn test_pool() -> Option<PgPool> {
+pub(super) async fn test_pool() -> Option<PgPool> {
     match std::env::var("SBCAMPAIGN_TEST_DATABASE_URL") {
         Ok(url) if !url.is_empty() => Some(
             PgPoolOptions::new()
@@ -83,7 +83,7 @@ async fn test_pool() -> Option<PgPool> {
 }
 
 /// Synthetic Steelbound account ids, unique per test and per run.
-fn synthetic_account(test: u32) -> u32 {
+pub(super) fn synthetic_account(test: u32) -> u32 {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
     0x7000_0000 | (test << 24) | (nanos & 0x00FF_FFFF)
 }
