@@ -30,6 +30,7 @@ out=$(mktemp "$dir/.status.XXXXXX")
     if [ "$(q "$db" 'SELECT 1')" = 1 ]; then
       echo "db.$db=ok"
       echo "db.$db.migrations=$(q "$db" 'SELECT count(*) FROM fork_migrations' || echo 0)"
+      echo "db.$db.procedures=$(q "$db" "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'")"
       echo "db.$db.period=$(q "$db" "SELECT round || '/' || turn FROM settings ORDER BY round DESC, turn DESC LIMIT 1" || echo none)"
 
       # Fingerprint: one line per table, then one hash over all of them.

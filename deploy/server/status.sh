@@ -67,7 +67,7 @@ if [ -r "$status_file" ]; then
   [ "$age" -le "$max_status_age" ] && pass "collected status is ${age}s old" || fail "collected status is ${age}s old"
   for db in steelcore steelcore_test; do
     [ "$(get "db\.$db")" = ok ] &&
-      pass "database $db reachable, $(get "db\.$db\.migrations") migrations, round/turn $(get "db\.$db\.period")" ||
+      pass "database $db reachable, $(get "db\.$db\.migrations") migrations, $(get "db\.$db\.procedures") procedures, round/turn $(get "db\.$db\.period")" ||
       fail "database $db not reachable"
   done
   bt=$(get 'backup\.steelcore\.time')

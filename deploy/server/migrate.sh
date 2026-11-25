@@ -24,6 +24,7 @@ manifest=$sqldir/fork/migrations.list
 [[ "$db" =~ ^[a-z_][a-z0-9_]*$ ]] || { echo "invalid database name: $db" >&2; exit 2; }
 [ -f "$manifest" ] || { echo "missing $manifest" >&2; exit 2; }
 
+export PGOPTIONS="${PGOPTIONS:-} -c client_min_messages=warning"
 psql_db() { psql -X -q -v ON_ERROR_STOP=1 -d "$db" "$@"; }
 
 psql_db <<'SQL'
