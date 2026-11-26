@@ -23,6 +23,8 @@ mod gateway_tests;
 #[cfg(test)]
 mod shop_tests;
 #[cfg(test)]
+mod trade_tests;
+#[cfg(test)]
 mod reset_tests;
 #[cfg(test)]
 mod faction_swap_tests;
