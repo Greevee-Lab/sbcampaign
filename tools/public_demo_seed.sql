@@ -82,4 +82,9 @@ BEGIN
     END LOOP;
 END $$;
 
+-- W528: one clearly led sector in the running turn (turn 4, third map), so the
+-- page shows calm and contested sectors side by side. Demo only.
+INSERT INTO wartide (round, "map", prf) VALUES (1, 12, 2500)
+ON CONFLICT (round, "map") DO UPDATE SET prf = wartide.prf + excluded.prf;
+
 COMMIT;

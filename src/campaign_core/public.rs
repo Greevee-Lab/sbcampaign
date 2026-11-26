@@ -746,6 +746,13 @@ pub fn build_all(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) 
             tide_by_index.insert(idx as usize, t.points);
         }
     }
+    // W528: battles (pilot results) per sector, from the per-player counts.
+    let mut sector_battles: HashMap<usize, i64> = HashMap::new();
+    for &(_, turn, map, n) in &snap.sector_counts {
+        if let Some(idx) = sector_of(turn, map, cfg.map_base) {
+            *sector_battles.entry(idx).or_insert(0) += n;
+        }
+    }
     let mut held = [0i64; 3];
     let mut war_points = [0i64; 3];
     let sectors: Vec<Value> = (0..SECTOR_COUNT as usize)
@@ -780,6 +787,7 @@ pub fn build_all(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) 
                 "points": {"hsd": pts[0], "prf": pts[1], "rb": pts[2]},
                 "share": {"hsd": share[0], "prf": share[1], "rb": share[2]},
                 "leader": lead.map(|l| SIDES[l]),
+                "battles": sector_battles.get(&i).copied().unwrap_or(0),
             })
         })
         .collect();

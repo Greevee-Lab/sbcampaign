@@ -485,7 +485,7 @@ Fields (schema 1): `generated_at`, `campaign {id, name, season}`, `period
 `sides[] {id, name, joins_turn, enlisted, active, pilot_points, war_points,
 sectors_held, influence, trend {last_24h, prev_24h}}`, `sectors[24] {index,
 turn, slot, name, state (closed|contested|upcoming), played, points, share,
-leader}`, `leaderboards {overall, hsd, prf, rb}[] {rank, pilot, side, points,
+leader, battles}`, `leaderboards {overall, hsd, prf, rb}[] {rank, pilot, side, points,
 kills, deaths, wins, sorties, captures, hits, shots, base_captures,
 capture_count, tippings}`, `pilots[] {pilot, side, round {..}, turn {..} |
 null}`, `battles[] {at, turn, sector, side, pilot, result (win|loss|null),
@@ -520,6 +520,11 @@ Pilot profiles, turn reports, awards (W527):
   the two best sides in the war (`gap` in war points, `margin` in share points
   like the pie chart). A "turned around" sector is not computed: the tables
   hold sums only, no time line per sector.
+- **Battles per sector** (`sectors[].battles`, W528): pilot results in that
+  sector this round, counted like `turns[].battles` (same filter: no banned,
+  suspended or annulled), so the three sectors of a turn add up to the turn.
+  No new query: the sum of the per-pilot counts behind `favorite_sector`.
+  Lead changes per sector are not exported for the same reason as above.
 - **Discord text** (`turns[].discord_md`, closed turns only): ready-made
   markdown for the steward, nothing posts it. Names and sector names are
   stripped of markdown, mention and link characters. Example:
