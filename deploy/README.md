@@ -495,6 +495,9 @@ W527: `pilots[].slug`, `pilots[].awards` (`[[turn, category, place]]`),
 influence, pilot {pilot, side, points, kills, slug} | null, closest {sector,
 leader, gap, margin} | null, discord_md (closed turns only)}`, `awards
 {categories, per_turn, turns}`.
+W529: `matches[] {at, turn, sector, winner (hsd|prf|rb|draw|null), note
+(one_side|conflict|null), sides[] {side, result (win|loss|mixed|null), points,
+kills, pilots[] {pilot, slug (listed pilots only), result, points, kills}}}`.
 
 Pilot profiles, turn reports, awards (W527):
 
@@ -525,6 +528,28 @@ Pilot profiles, turn reports, awards (W527):
   suspended or annulled), so the three sectors of a turn add up to the turn.
   No new query: the sum of the per-pilot counts behind `favorite_sector`.
   Lead changes per sector are not exported for the same reason as above.
+- **Matches** (`matches[]`, W529, `[public] matches`, default 30, at most
+  50): the same pilot results as `battles[]` (same filter: no banned,
+  suspended or annulled report), grouped into whole battles, newest first.
+  There is no match id in the data. Every pilot of a match reports on its own
+  at the end of the match, so one match = the reports of one round, turn and
+  sector (map) that arrive at most 120 s after its first report
+  (`MATCH_WINDOW_SECS`), each pilot at most once (a second report of the same
+  pilot starts a new match). Live data 26.11.2026: in all four matches both
+  reports came within the same minute, the matches themselves were 11 to 16
+  minutes apart; 120 s leaves room for slow consoles in big matches and is far
+  shorter than one match. Two separate matches in the same sector that end
+  within 120 s of each other with different pilots would be shown as one.
+  `at` = the last report, to the minute. Per side: sums of points and kills,
+  the pilots best first; the winner first, otherwise the game order.
+  **Winner:** the one side whose pilots reported `win`; two sides with `win`,
+  or one side whose pilots disagree: `null` with `note = "conflict"`; every
+  reporting side lost: `draw`; only one side reported: shown anyway with
+  `note = "one_side"` (a win stays a win, a loss has no winner). The export
+  reads the newest 1 200 results for this (`MATCH_ROWS`); when there are more,
+  a match that began within 120 s of the oldest one read is left out, as it
+  may miss reports. `matches[]` gives way first (oldest matches) if the file
+  would grow past 95 % of its limit; nothing else is shortened.
 - **Discord text** (`turns[].discord_md`, closed turns only): ready-made
   markdown for the steward, nothing posts it. Names and sector names are
   stripped of markdown, mention and link characters. Example:
@@ -544,8 +569,11 @@ Pilot profiles, turn reports, awards (W527):
   annulled or a pilot banned later. Round awards (`turn = 0`, top 20) only
   exist after turn 8 and are not shown yet.
 - Size: the largest configuration (250 pilots, 100 per leaderboard, 100
-  battles, every value at 7 digits, turn 8) gives 236 KB (test, below 95 % of
-  the limit), the defaults about 139 KB; a pilot file at most about 4.4 KB.
+  battles, every value at 7 digits, turn 8) gives 236 KB without matches
+  (test, below 95 % of the limit); with 50 matches of 12 pilots there is room
+  for 8 of them there. The defaults with 30 matches of 12 pilots, every value
+  at 7 digits: about 182 KB; a pilot file at most about 4.4 KB. Demo (57
+  pilots, 30 matches): 58 KB.
 
 Rankings (W526): `pilots` is the full ranking list, every ranked pilot of
 the round in kill-point order with two blocks of the ten sums, `round` and
