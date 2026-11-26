@@ -447,8 +447,10 @@ public for everyone. The data path:
 ```
 steelcore-public.timer (2 min) -> sbcampaign /etc/steelcore/steelcore.toml --public-export
   -> /var/lib/steelcore/public/<campaign>.json   (atomic: temp file + rename, 0644, <= 256 KiB)
+  -> /var/lib/steelcore/public/<campaign>/pilots/<slug>.json   (W527, one per listed pilot, <= 64 KiB)
 steelnet --public-api 127.0.0.1:47104 --public-api-dir /var/lib/steelcore/public
   -> GET /v1/campaigns, GET /v1/campaigns/<campaign>.json   (loopback HTTP only)
+  -> GET /v1/campaigns/<campaign>/pilots/<slug>.json, GET /v1/campaigns/<campaign>/live.json   (W527)
 host Caddy: api.core.steelbound.dev -> reverse_proxy 127.0.0.1:47104   (TLS, Let's Encrypt)
 browser on core.steelbound.dev (GitHub Pages) loads the JSON every 60 s (CORS for that origin only)
 ```
@@ -474,7 +476,7 @@ No new public port, no secrets in any repository, no GitHub key on the server.
   pilot data, addresses. Banned accounts, suspended identities and annulled
   results are left out; a pilot with nothing left is not ranked. The war tide
   stays the game's sum (it is what the game shows in its pie chart).
-- Times are rounded to the minute in the battle feed.
+- Times are rounded to the minute (battle feed, pilot files, turn ends).
 - Schema `"schema": 1`; fields are only added, a change of meaning needs 2.
 - A failed run leaves the previous file as it is (exit code != 0, journal).
 
@@ -487,7 +489,58 @@ leader}`, `leaderboards {overall, hsd, prf, rb}[] {rank, pilot, side, points,
 kills, deaths, wins, sorties, captures, hits, shots, base_captures,
 capture_count, tippings}`, `pilots[] {pilot, side, round {..}, turn {..} |
 null}`, `battles[] {at, turn, sector, side, pilot, result (win|loss|null),
-points, kills}`, `totals {ranked_pilots, ranked_pilots_turn, battles_round}`.
+points, kills}`, `totals {ranked_pilots, ranked_pilots_turn, battles_round}`,
+W527: `pilots[].slug`, `pilots[].awards` (`[[turn, category, place]]`),
+`turns[] {turn, state (closed|contested), ends_at, battles, war_points,
+influence, pilot {pilot, side, points, kills, slug} | null, closest {sector,
+leader, gap, margin} | null, discord_md (closed turns only)}`, `awards
+{categories, per_turn, turns}`.
+
+Pilot profiles, turn reports, awards (W527):
+
+- **Slugs:** from the shown name (lower case, every run of other characters
+  becomes `-`), unique in the document: real names first, then placeholders,
+  each in name order; a taken slug gets `-2`, `-3`. Never an id. Only the
+  pilots in `pilots` get a slug and a file.
+- **Pilot files** `<out_dir>/<campaign>/pilots/<slug>.json`: `schema`,
+  `campaign {id}`, `period {round, turn}`, `pilot`, `slug`, `side`, `round`,
+  `turn`, `history[] {turn, side, ten sums}` (turns with games),
+  `favorite_sector {sector, battles}` (most battles, tie: the later sector),
+  `battles[]` (the latest 10, same form as the feed without `pilot`),
+  `awards[] {turn, category, rank}`. Same privacy rules and the same read-only
+  transaction as the main file. Written before the main file, changed files
+  only (unchanged ones keep their time stamp and ETag); files of pilots that
+  are no longer listed are removed after the main file. Only names of the slug
+  form are ever written or removed in that directory.
+- **Turns:** one entry per turn so far. `war_points` = the three sectors of
+  that turn; `influence` = the game's war influence after that turn (sectors up
+  to the turn, open ones shared, RB from turn 3), so the running turn equals
+  `sides[].influence`. `pilot` = most kill points in the turn (then kills, then
+  name). `closest` = the played sector with the smallest war-point gap between
+  the two best sides in the war (`gap` in war points, `margin` in share points
+  like the pie chart). A "turned around" sector is not computed: the tables
+  hold sums only, no time line per sector.
+- **Discord text** (`turns[].discord_md`, closed turns only): ready-made
+  markdown for the steward, nothing posts it. Names and sector names are
+  stripped of markdown, mention and link characters. Example:
+  `curl -s https://api.core.steelbound.dev/v1/campaigns/steelbound-s1.json |
+  jq -r '.turns[] | select(.state == "closed") | .discord_md' | tail -n 7`.
+- **Awards:** the `awards` table loses a row as soon as the pilot claims the
+  award in the game (`award_claim` deletes it), so it is no history. The export
+  computes the turn awards of every closed turn of the round again from the
+  leaderboard with the rules of `give_turn_award.sql`: `rank1` weapon accuracy
+  (`stat1 * 1000 / stat2`, at least 50 shots in the turn), `rank2` kill points
+  (`stat4 > 0`; the game files it under "kill count" when it shows the
+  award), `rank3` mission victory rate (`stat6 * 1000 / stat7`, at least 5
+  missions in the turn), `rank4` base captures (`stat8 > 0`); top 10 per
+  category (integer per mille as in the SQL, equal values by name). Banned
+  and suspended pilots are not ranked, annulled results are not counted, so
+  the list can differ from what the game handed out when a result was
+  annulled or a pilot banned later. Round awards (`turn = 0`, top 20) only
+  exist after turn 8 and are not shown yet.
+- Size: the largest configuration (250 pilots, 100 per leaderboard, 100
+  battles, every value at 7 digits, turn 8) gives 236 KB (test, below 95 % of
+  the limit), the defaults about 139 KB; a pilot file at most about 4.4 KB.
 
 Rankings (W526): `pilots` is the full ranking list, every ranked pilot of
 the round in kill-point order with two blocks of the ten sums, `round` and
@@ -529,7 +582,8 @@ rank by kill points, then kills.
    steelcore-public`, then check the journal line `public export: ...`.
 3. steelnet must be able to read the directory: `/var/lib/steelcore` needs
    `o+x` (or an ACL `u:steelnet:x`), `/var/lib/steelcore/public` is created
-   0755. The key file stays 0600.
+   0755 (W527: `public/<campaign>/pilots` too, by the exporter with umask
+   0022). The key file stays 0600.
 4. steelnet switch, Caddy entry and DNS: steelnet `deploy/README.md` (W524)
    and `deploy/caddy-api.core.example`.
 
