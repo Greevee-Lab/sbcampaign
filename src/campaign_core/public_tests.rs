@@ -42,6 +42,8 @@ const KEYS: &[&str] = &[
     "played", "points", "share", "hsd", "prf", "rb", "leader", "leaderboards", "overall", "rank", "pilot", "side",
     "kills", "deaths", "wins", "sorties", "captures", "battles", "at", "sector", "result", "totals", "ranked_pilots",
     "battles_round",
+    // W526: all ranking categories of the game, full ranking list with round and turn.
+    "hits", "shots", "base_captures", "capture_count", "tippings", "pilots", "ranked_pilots_turn",
 ];
 
 fn keys(v: &Value, out: &mut BTreeSet<String>) {
@@ -76,6 +78,7 @@ fn snapshot() -> Snapshot {
         name: name.map(str::to_owned),
         faction: Some(f.to_owned()),
         stats: [10, 20, kills, kp, 1, 2, 3, 0, 0, 0],
+        turn_stats: [0; 10],
     };
     let at = Utc.with_ymd_and_hms(2026, 11, 26, 12, 34, 56).unwrap();
     let battle = |n: u128, name: Option<&str>, f: &str, map: i16, win: bool| Battle {
@@ -321,15 +324,153 @@ fn public_document_shape_and_privacy() {
 }
 
 #[test]
+fn public_full_ranking_list_has_every_category_round_and_turn() {
+    let c = cfg();
+    let mut snap = snapshot();
+    // Ace played this turn too; Fay has only tippings this round.
+    snap.standings[0].stats = [40, 160, 9, 900, 3, 4, 6, 2, 5, 1];
+    snap.standings[0].turn_stats = [4, 10, 1, 90, 0, 1, 1, 0, 1, 0];
+    snap.standings[5].stats = [0, 0, 0, 0, 0, 0, 0, 0, 0, 7];
+    let doc = build(&c, &snap, &mut Placeholders::new(&[7u8; 32], &c.season));
+    render(&doc).unwrap();
+
+    // Leaderboard rows: new fields only, `captures` keeps its W524 meaning (stat8 = base captures).
+    let top = &doc["leaderboards"]["overall"][0];
+    assert_eq!(top["pilot"], "Ace One");
+    assert_eq!((top["hits"].as_i64(), top["shots"].as_i64()), (Some(40), Some(160)));
+    assert_eq!(top["captures"], 2);
+    assert_eq!(top["base_captures"], 2);
+    assert_eq!(top["capture_count"], 5);
+    assert_eq!(top["tippings"], 1);
+    assert_eq!(top["sorties"], 6, "sorties = missions played (stat7)");
+
+    // Full list: every ranked pilot (more than leaderboard_size = 3), sorted like the ranking.
+    let pilots = doc["pilots"].as_array().unwrap();
+    assert_eq!(pilots.len(), 6);
+    assert_eq!(doc["totals"]["ranked_pilots"], 6);
+    assert_eq!(doc["totals"]["ranked_pilots_turn"], 1);
+    assert_eq!(pilots[0]["pilot"], "Ace One");
+    assert_eq!(pilots[0]["side"], "hsd");
+    let r = &pilots[0]["round"];
+    let want = [
+        ("hits", 40),
+        ("shots", 160),
+        ("kills", 9),
+        ("points", 900),
+        ("deaths", 3),
+        ("wins", 4),
+        ("sorties", 6),
+        ("base_captures", 2),
+        ("capture_count", 5),
+        ("tippings", 1),
+    ];
+    for (k, v) in want {
+        assert_eq!(r[k], v, "round.{k}");
+    }
+    assert_eq!(r.as_object().unwrap().len(), 10);
+    assert_eq!(pilots[0]["turn"]["points"], 90);
+    assert_eq!(pilots[0]["turn"]["capture_count"], 1);
+    assert!(pilots[1..].iter().all(|p| p["turn"].is_null()), "no games this turn -> null");
+    let fay = pilots.iter().find(|p| p["pilot"] == "Fay").expect("a pilot with only tippings is ranked");
+    assert_eq!(fay["round"]["tippings"], 7);
+    // The same names as in the leaderboards (placeholders, cleaned names).
+    let p2 = pilots.iter().find(|p| p["side"] == "prf").unwrap();
+    assert_eq!(p2["pilot"], doc["leaderboards"]["prf"][0]["pilot"]);
+    assert!(!String::from_utf8(render(&doc).unwrap()).unwrap().contains("bad"));
+}
+
+#[test]
+fn public_ranking_selection_keeps_every_category_leader() {
+    // 50 pilots sorted by kill points; the list holds 12.
+    let mut all: Vec<Standing> = (0..50u128)
+        .map(|n| Standing {
+            player: uid(n),
+            name: None,
+            faction: Some("hsd".into()),
+            stats: [1, 1, 1, 1000 - n as i64, 1, 1, 1, 0, 0, 0],
+            turn_stats: [0; 10],
+        })
+        .collect();
+    all[40].stats[9] = 99; // most tippings
+    all[45].turn_stats[3] = 5; // the only kill points this turn
+    all[49].stats[0] = 500; // most hits
+    let refs: Vec<&Standing> = all.iter().collect();
+    let keep = ranking_selection(&refs, 12);
+    assert_eq!(keep.len(), 12);
+    for i in [0, 40, 45, 49] {
+        assert!(keep.contains(&i), "pilot {i} leads a category and must stay");
+    }
+    assert!(keep.contains(&1) && !keep.contains(&30), "the rest follows kill points");
+    assert_eq!(ranking_selection(&refs, 50).len(), 50, "everyone while they fit");
+
+    // The document follows the selection and keeps the kill-point order.
+    let c = PublicConfig { ranking_pilots: 12, ..cfg() };
+    let mut snap = snapshot();
+    snap.standings = all;
+    let doc = build(&c, &snap, &mut Placeholders::new(&[2u8; 32], ""));
+    let pilots = doc["pilots"].as_array().unwrap();
+    assert_eq!(pilots.len(), 12);
+    assert_eq!(doc["totals"]["ranked_pilots"], 50);
+    let pts: Vec<i64> = pilots.iter().map(|p| p["round"]["points"].as_i64().unwrap()).collect();
+    assert!(pts.windows(2).all(|w| w[0] >= w[1]), "sorted by kill points: {pts:?}");
+    assert!(pilots.iter().any(|p| p["round"]["tippings"] == 99));
+}
+
+#[test]
 fn public_document_size_is_bounded() {
     let c = PublicConfig { leaderboard_size: 100, battles: 100, ..cfg() };
     let mut snap = snapshot();
     snap.standings = (0..5000u128)
-        .map(|n| Standing { player: uid(n), name: None, faction: Some("hsd".into()), stats: [n as i64; 10] })
+        .map(|n| Standing {
+            player: uid(n),
+            name: None,
+            faction: Some("hsd".into()),
+            stats: [n as i64; 10],
+            turn_stats: [n as i64; 10],
+        })
         .collect();
     let doc = build(&c, &snap, &mut Placeholders::new(&[1u8; 32], ""));
     let bytes = render(&doc).unwrap();
     assert!(bytes.len() < MAX_BYTES / 2, "{} bytes", bytes.len());
+
+    // Worst case of every list at its upper bound: longest names, large values, both periods.
+    let root: toml::Table = r#"
+        [ticket]
+        campaign = "steelbound-s1"
+        [public]
+        leaderboard_size = 100
+        ranking_pilots = 250
+        battles = 100
+    "#
+    .parse()
+    .unwrap();
+    let max = PublicConfig::from_toml(&root).unwrap();
+    assert_eq!((max.leaderboard_size, max.ranking_pilots, max.battles), (100, 250, 100));
+    snap.standings = (0..1000u128)
+        .map(|n| Standing {
+            player: uid(n),
+            name: Some(format!("Pilot{n:011}")),
+            faction: Some(["hsd", "prf", "rb"][n as usize % 3].into()),
+            stats: [9_999_999; 10],
+            turn_stats: [999_999; 10],
+        })
+        .collect();
+    let at = snap.now;
+    snap.battles = (0..100u128)
+        .map(|n| Battle {
+            at,
+            turn: 8,
+            map: 2,
+            faction: "prf".into(),
+            player: uid(n),
+            name: Some(format!("Pilot{n:011}")),
+            points: vec![9_999_999; 10],
+        })
+        .collect();
+    let doc = build(&max, &snap, &mut Placeholders::new(&[1u8; 32], ""));
+    assert_eq!(doc["pilots"].as_array().unwrap().len(), 250);
+    let bytes = render(&doc).expect("the largest configuration fits the size limit");
+    assert!(bytes.len() < MAX_BYTES * 9 / 10, "{} bytes", bytes.len());
     let huge = Value::String("x".repeat(MAX_BYTES));
     assert!(render(&huge).is_err());
 }
@@ -491,8 +632,28 @@ async fn db_public_export_hides_banned_suspended_and_annulled() {
     // Annulled ledger rows: the annulment already took them out of the sums.
     result(&pool, x, round, 1, 2, "rb", st(400, 1), 400, true).await;
 
+    // A second result of the ace in the current turn of the campaign.
+    let now_turn: i16 = sqlx::query_scalar("SELECT turn FROM settings ORDER BY round DESC, turn DESC LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    result(&pool, a, round, now_turn, 2, "hsd", st(50, 0), 20, false).await;
+
     let c = PublicConfig { leaderboard_size: 50, battles: 50, ..cfg() };
     let snap = collect(&pool, c.battles, Some(round)).await.expect("collect");
+    // Turn sums: only rows of the current turn (from `settings`) count.
+    let turn = snap.period.turn;
+    assert_eq!(turn, now_turn);
+    let ace_turn = snap.standings.iter().find(|s| s.player == a.0).unwrap().turn_stats;
+    let mut want = st(50, 0);
+    if turn == 1 {
+        for (w, v) in want.iter_mut().zip(st(500, 1)) {
+            *w += v;
+        }
+    }
+    assert_eq!(ace_turn, want, "turn {turn}");
+    let unnamed_turn = snap.standings.iter().find(|s| s.player == n.0).unwrap().turn_stats;
+    assert_eq!(unnamed_turn, if turn == 1 { st(300, 0) } else { [0; 10] });
     let doc = build(&c, &snap, &mut Placeholders::new(&[3u8; 32], "test"));
     let text = String::from_utf8(render(&doc).unwrap()).unwrap();
 
@@ -504,11 +665,17 @@ async fn db_public_export_hides_banned_suspended_and_annulled() {
     let overall = doc["leaderboards"]["overall"].as_array().unwrap();
     assert_eq!(overall.len(), 2, "ace and the unnamed pilot; the annulled pilot has nothing left: {overall:?}");
     assert_eq!(overall[0]["pilot"], ace.as_str());
-    assert_eq!(overall[0]["points"], 500);
+    assert_eq!(overall[0]["points"], 550);
+    assert_eq!(overall[0]["hits"], 20);
+    assert_eq!(overall[0]["shots"], 40);
     assert!(overall[1]["pilot"].as_str().unwrap().starts_with("Pilot #"));
+    let pilots = doc["pilots"].as_array().unwrap();
+    assert_eq!(pilots.len(), 2, "the full list has the same pilots: {pilots:?}");
+    assert_eq!(pilots[0]["round"]["points"], 550);
+    assert_eq!(pilots[0]["turn"]["points"], if turn == 1 { 550 } else { 50 });
     let battles = doc["battles"].as_array().unwrap();
-    assert_eq!(battles.len(), 2, "banned, suspended and annulled results are left out: {battles:?}");
-    assert_eq!(doc["totals"]["battles_round"], 2);
+    assert_eq!(battles.len(), 3, "banned, suspended and annulled results are left out: {battles:?}");
+    assert_eq!(doc["totals"]["battles_round"], 3);
     // The war tide still holds the hidden players' points (sums of the game); the sector leaders follow it.
     assert_eq!(doc["sectors"][0]["points"]["hsd"], 1100);
     // Read only: the export never writes.

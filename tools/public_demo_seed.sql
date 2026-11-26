@@ -1,9 +1,11 @@
 -- SPDX-License-Identifier: AGPL-3.0-only
 -- Synthetic demo campaign for the public campaign data (W524), on top of a test
 -- database (migrate.sh <db> sql/fork/test_seed.sql). Never on production.
--- Round 1, turn 4, 36 pilots (some without display name, one banned, one
+-- Round 1, turn 4, 60 pilots (some without display name, one banned, one
 -- suspended, one with only annulled results), war tide for turns 1-4, battles
--- of the last two days. Deterministic (setseed).
+-- of the last two days. Deterministic (setseed). W526: hits always below
+-- shots, every 7th pilot only played once this turn (below the page's minimum
+-- for rates).
 -- Used by tools/public_demo.sh.
 
 BEGIN;
@@ -19,11 +21,13 @@ DECLARE
     names text[] := ARRAY['Iron Vale', 'Kestrel', 'Grey Lantern', 'Ashfall', 'Bulwark', 'Nightjar', 'Cobalt',
         'Tin Soldier', 'Rook', 'Vantage', 'Foxtrot Nine', 'Halberd', 'Mossback', 'Quarry', 'Sable', 'Driftwood',
         'Ember', 'Longbow', 'Pike', 'Marrow', 'Talon', 'Wren', 'Gantry', 'Basalt', 'Corvid', 'Hollow Point',
-        'Slate', 'Rampart', 'Thistle', 'Anvil', NULL, NULL, NULL, 'Banned Demo', 'Suspended Demo', 'Annulled Demo'];
+        'Slate', 'Rampart', 'Thistle', 'Anvil', 'Bramble', 'Cinder', 'Dunmore', 'Echo Six', 'Flint', 'Glacier',
+        'Harrow', 'Ironclad', 'Juniper', 'Kodiak', 'Lantern', 'Magpie', 'Nettle', 'Onyx', 'Peregrine', 'Quill',
+        'Riptide', 'Starling', 'Tundra', 'Umber', 'Vesper', 'Warden', 'Yarrow', 'Zephyr', NULL, NULL, NULL, 'Banned Demo', 'Suspended Demo', 'Annulled Demo'];
     sides text[] := ARRAY['hsd', 'prf', 'rb'];
     i int; t int; m int; k int;
     pid uuid; iid uuid; side text;
-    st int[]; war int; at timestamptz;
+    st int[]; war int; shots int; at timestamptz;
 BEGIN
     FOR i IN 1..array_length(names, 1) LOOP
         pid := ('5342dead-0000-4000-8000-' || lpad(to_hex(i), 12, '0'))::uuid;
@@ -39,12 +43,13 @@ BEGIN
             VALUES (pid, names[i], lower(names[i]), lower(names[i]));
         END IF;
         -- RB joins in turn 3.
-        FOR t IN (CASE WHEN side = 'rb' THEN 3 ELSE 1 END)..4 LOOP
-            FOR k IN 1..(1 + floor(random() * 3))::int LOOP
+        FOR t IN (CASE WHEN i % 7 = 0 THEN 4 WHEN side = 'rb' THEN 3 ELSE 1 END)..4 LOOP
+            FOR k IN 1..(CASE WHEN i % 7 = 0 THEN 1 ELSE (1 + floor(random() * 3))::int END) LOOP
                 -- Map 1..3 within the turn, as the game sends it.
                 m := 1 + floor(random() * 3)::int;
+                shots := (60 + random() * 340)::int;
                 st := ARRAY[
-                    (40 + random() * 160)::int, (150 + random() * 250)::int, (random() * 6)::int,
+                    (shots * (0.15 + random() * 0.5))::int, shots, (random() * 6)::int,
                     (random() * 900)::int, (random() * 4)::int, (random() < 0.5)::int, 1,
                     (random() < 0.2)::int, (random() < 0.3)::int, (random() < 0.1)::int];
                 war := (20 + random() * 180)::int;

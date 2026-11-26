@@ -76,6 +76,8 @@ out_dir = "/var/lib/steelcore/public"
 # inside out_dir.
 name_key = "/var/lib/steelcore/public-name.key"
 leaderboard_size = 25
+# Full ranking list for the page's categories (round + turn); at most 250.
+ranking_pilots = 200
 battles = 30
 # First map number of a turn as the game sends it (1..3 per turn). Default 1.
 map_base = 1

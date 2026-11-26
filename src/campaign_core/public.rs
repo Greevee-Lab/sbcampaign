@@ -56,6 +56,8 @@ pub const MAX_BYTES: usize = 256 * 1024;
 /// Upper bounds for the configurable list lengths.
 const MAX_LEADERBOARD: usize = 100;
 const MAX_BATTLES: usize = 100;
+/// Upper bound of `[public] ranking_pilots` (the full ranking list, `pilots`).
+const MAX_PILOTS: usize = 250;
 /// Longest display name that is shown (the name rules allow 15 characters).
 const MAX_NAME_CHARS: usize = 16;
 
@@ -70,6 +72,8 @@ pub struct PublicConfig {
     /// Secret key file for the placeholder numbers (created if missing).
     pub name_key: PathBuf,
     pub leaderboard_size: usize,
+    /// Most pilots in the full ranking list (`pilots`); default 200.
+    pub ranking_pilots: usize,
     pub battles: usize,
     /// Value the game uses for the first map of a turn (0 or 1). The game
     /// sends 1..=3 (live data 26.11.2026: maps 1, 2 and 3 in turn 1), so the
@@ -165,6 +169,7 @@ impl PublicConfig {
             out_dir: PathBuf::from(text(p, "out_dir", 200)?.unwrap_or("/var/lib/steelcore/public".into())),
             name_key: PathBuf::from(text(p, "name_key", 200)?.unwrap_or("/var/lib/steelcore/public-name.key".into())),
             leaderboard_size: count(p, "leaderboard_size", 25, MAX_LEADERBOARD)?,
+            ranking_pilots: count(p, "ranking_pilots", 200, MAX_PILOTS)?,
             battles: count(p, "battles", 30, MAX_BATTLES)?,
             map_base,
             sector_names,
@@ -188,13 +193,18 @@ pub struct Period {
     pub ends_at: DateTime<Utc>,
 }
 
-/// Sums of one player in the current round. `stats[i]` = `stat{i+1}`.
+/// Sums of one player in the current round. `stats[i]` = `stat{i+1}` (upstream
+/// `RankCategory`, `src/command.rs`): 1 hits, 2 shots (accuracy = 1/2), 3 kills,
+/// 4 kill points, 5 deaths, 6 mission victories, 7 missions played (win rate =
+/// 6/7), 8 base captures, 9 captures, 10 tippings.
 #[derive(Debug, Clone)]
 pub struct Standing {
     pub player: Uuid,
     pub name: Option<String>,
     pub faction: Option<String>,
     pub stats: [i64; 10],
+    /// The same sums for the current turn only (the game's turn ranking).
+    pub turn_stats: [i64; 10],
 }
 
 #[derive(Debug, Clone)]
@@ -253,10 +263,11 @@ pub async fn collect(pool: &PgPool, battles: usize, round: Option<i16>) -> Resul
     let round = round.unwrap_or(r);
     let period = Period { round, turn, ends_at };
 
-    let rows: Vec<(Uuid, Option<String>, Option<String>, Vec<i64>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT l.xuid, d.name, a.faction::text,
-                ARRAY[SUM(l.stat1), SUM(l.stat2), SUM(l.stat3), SUM(l.stat4), SUM(l.stat5),
-                      SUM(l.stat6), SUM(l.stat7), SUM(l.stat8), SUM(l.stat9), SUM(l.stat10)]::bigint[]
+    let round_sums = (1..=10).map(|i| format!("SUM(l.stat{i})")).collect::<Vec<_>>().join(", ");
+    let turn_sums =
+        (1..=10).map(|i| format!("SUM(CASE WHEN l.turn = $2 THEN l.stat{i} ELSE 0 END)")).collect::<Vec<_>>().join(", ");
+    let rows: Vec<(Uuid, Option<String>, Option<String>, Vec<i64>, Vec<i64>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT l.xuid, d.name, a.faction::text, ARRAY[{round_sums}]::bigint[], ARRAY[{turn_sums}]::bigint[]
          FROM public.leaderboard l
          LEFT JOIN public.accounts a ON a.xuid = l.xuid
          LEFT JOIN core.display_name d ON d.player_id = l.xuid
@@ -264,17 +275,19 @@ pub async fn collect(pool: &PgPool, battles: usize, round: Option<i16>) -> Resul
          GROUP BY l.xuid, d.name, a.faction"
     )))
     .bind(round)
+    .bind(turn)
     .fetch_all(&mut *tx)
     .await?;
+    let ten = |s: Vec<i64>| {
+        let mut out = [0i64; 10];
+        for (i, v) in s.into_iter().take(10).enumerate() {
+            out[i] = v;
+        }
+        out
+    };
     let standings = rows
         .into_iter()
-        .map(|(player, name, faction, s)| {
-            let mut stats = [0i64; 10];
-            for (i, v) in s.into_iter().take(10).enumerate() {
-                stats[i] = v;
-            }
-            Standing { player, name, faction, stats }
-        })
+        .map(|(player, name, faction, s, t)| Standing { player, name, faction, stats: ten(s), turn_stats: ten(t) })
         // Nothing left (e.g. all results annulled): not ranked.
         .filter(|s| s.stats.iter().any(|&v| v != 0))
         .collect();
@@ -566,7 +579,13 @@ pub fn build(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) -> V
             "deaths": s.stats[4],
             "wins": s.stats[5],
             "sorties": s.stats[6],
+            // W524 name for stat8 (base captures); kept as it is (schema 1 only adds fields).
             "captures": s.stats[7],
+            "hits": s.stats[0],
+            "shots": s.stats[1],
+            "base_captures": s.stats[7],
+            "capture_count": s.stats[8],
+            "tippings": s.stats[9],
         })
     };
     let board = |filter: Option<&str>| -> Vec<Value> {
@@ -582,6 +601,24 @@ pub fn build(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) -> V
     for side in SIDES {
         boards.insert(side.into(), Value::Array(board(Some(side))));
     }
+
+    // Full ranking list: every ranked pilot (up to `ranking_pilots`) with the
+    // round and the current turn, so the page can rank any category and side.
+    let listed = ranking_selection(&rows.iter().map(|(_, s)| *s).collect::<Vec<_>>(), cfg.ranking_pilots);
+    let pilots: Vec<Value> = rows
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| listed.contains(i))
+        .map(|(_, (n, s))| {
+            json!({
+                "pilot": n,
+                "side": s.faction.as_deref().filter(|f| side_index(f).is_some()),
+                "round": stat_block(&s.stats),
+                "turn": if s.turn_stats.iter().any(|&v| v != 0) { stat_block(&s.turn_stats) } else { Value::Null },
+            })
+        })
+        .collect();
+    let ranked_turn = snap.standings.iter().filter(|s| s.turn_stats.iter().any(|&v| v != 0)).count();
 
     // Side summaries.
     let mut pilot_points = [0i64; 3];
@@ -651,14 +688,60 @@ pub fn build(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) -> V
         "sides": sides,
         "sectors": sectors,
         "leaderboards": boards,
+        "pilots": pilots,
         "battles": battles,
-        "totals": {"ranked_pilots": rows.len(), "battles_round": snap.battles_round},
+        "totals": {
+            "ranked_pilots": rows.len(),
+            "ranked_pilots_turn": ranked_turn,
+            "battles_round": snap.battles_round,
+        },
     })
 }
 
-/// Serialize with the size limit.
+/// The ten sums of one pilot under their public names (`pilots[].round` / `.turn`).
+fn stat_block(s: &[i64; 10]) -> Value {
+    json!({
+        "hits": s[0],
+        "shots": s[1],
+        "kills": s[2],
+        "points": s[3],
+        "deaths": s[4],
+        "wins": s[5],
+        "sorties": s[6],
+        "base_captures": s[7],
+        "capture_count": s[8],
+        "tippings": s[9],
+    })
+}
+
+/// Indices of the pilots in the full ranking list. All of them while they fit;
+/// above `max` the best of every single sum (round and turn) are kept first,
+/// so each category still has its leaders.
+pub fn ranking_selection(standings: &[&Standing], max: usize) -> HashSet<usize> {
+    if standings.len() <= max {
+        return (0..standings.len()).collect();
+    }
+    let mut best = vec![usize::MAX; standings.len()];
+    for period in 0..2 {
+        for k in 0..10 {
+            let value = |i: usize| if period == 0 { standings[i].stats[k] } else { standings[i].turn_stats[k] };
+            let mut order: Vec<usize> = (0..standings.len()).filter(|&i| value(i) > 0).collect();
+            order.sort_by(|&a, &b| value(b).cmp(&value(a)).then(a.cmp(&b)));
+            for (rank, i) in order.into_iter().enumerate() {
+                best[i] = best[i].min(rank);
+            }
+        }
+    }
+    let mut order: Vec<usize> = (0..standings.len()).collect();
+    // `standings` comes sorted by kill points: the index breaks ties.
+    order.sort_by_key(|&i| (best[i], i));
+    order.into_iter().take(max).collect()
+}
+
+/// Serialize with the size limit (compact: the file is for programs, and the
+/// full ranking list needs the room).
 pub fn render(doc: &Value) -> Result<Vec<u8>, String> {
-    let mut out = serde_json::to_vec_pretty(doc).map_err(|e| e.to_string())?;
+    let mut out = serde_json::to_vec(doc).map_err(|e| e.to_string())?;
     out.push(b'\n');
     if out.len() > MAX_BYTES {
         return Err(format!("public document too large ({} bytes, limit {MAX_BYTES})", out.len()));
