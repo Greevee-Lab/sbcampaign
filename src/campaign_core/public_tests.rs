@@ -664,6 +664,12 @@ fn public_turn_reports_awards_and_pilot_files() {
     assert_eq!(eve["awards"], serde_json::json!([[1, 3, 1]]), "too few shots and missions: base captures only");
     assert!(pilots.iter().find(|p| p["pilot"] == "Fay").unwrap().get("awards").is_none());
 
+    // W528: battles per sector, summed over the pilots (turn 9 is outside the round).
+    let sectors = doc["sectors"].as_array().unwrap();
+    let per_sector: Vec<i64> = sectors.iter().map(|s| s["battles"].as_i64().unwrap()).collect();
+    assert_eq!(&per_sector[..7], &[3, 9, 0, 0, 0, 0, 9]);
+    assert_eq!(per_sector.iter().sum::<i64>(), 21);
+
     // Turns: one entry per turn so far.
     let turns = doc["turns"].as_array().unwrap();
     assert_eq!(turns.len(), 3);
