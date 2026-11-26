@@ -5,7 +5,8 @@
 -- suspended, one with only annulled results), war tide for turns 1-4, battles
 -- of the last two days. Deterministic (setseed). W526: hits always below
 -- shots, every 7th pilot only played once this turn (below the page's minimum
--- for rates).
+-- for rates). W527: settings rows for the closed turns 1-3 (turn reports),
+-- 2-7 missions per pilot and turn (so the game's award minimums are reached).
 -- Used by tools/public_demo.sh.
 
 BEGIN;
@@ -14,7 +15,8 @@ SELECT setseed(0.524);
 
 DELETE FROM settings;
 INSERT INTO settings (round, turn, "period")
-VALUES (1, 4, date_trunc('hour', now()) + INTERVAL '2 days 5 hours');
+SELECT 1, t, date_trunc('hour', now()) + INTERVAL '2 days 5 hours' - (4 - t) * INTERVAL '7 days'
+FROM generate_series(1, 4) AS t;
 
 DO $$
 DECLARE
@@ -44,7 +46,7 @@ BEGIN
         END IF;
         -- RB joins in turn 3.
         FOR t IN (CASE WHEN i % 7 = 0 THEN 4 WHEN side = 'rb' THEN 3 ELSE 1 END)..4 LOOP
-            FOR k IN 1..(CASE WHEN i % 7 = 0 THEN 1 ELSE (1 + floor(random() * 3))::int END) LOOP
+            FOR k IN 1..(CASE WHEN i % 7 = 0 THEN 1 ELSE (2 + floor(random() * 6))::int END) LOOP
                 -- Map 1..3 within the turn, as the game sends it.
                 m := 1 + floor(random() * 3)::int;
                 shots := (60 + random() * 340)::int;

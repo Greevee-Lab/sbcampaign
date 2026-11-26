@@ -60,6 +60,22 @@ const MAX_BATTLES: usize = 100;
 const MAX_PILOTS: usize = 250;
 /// Longest display name that is shown (the name rules allow 15 characters).
 const MAX_NAME_CHARS: usize = 16;
+/// Latest battles in one pilot file.
+pub const PILOT_BATTLES: usize = 10;
+/// Longest pilot slug (`[a-z0-9]+(-[a-z0-9]+)*`, the same rule as steelnet).
+pub const MAX_SLUG: usize = 40;
+/// Hard size limit of one pilot file.
+pub const MAX_PILOT_BYTES: usize = 64 * 1024;
+/// Award categories in the order of the `awards` table (`rank1..rank4`,
+/// upstream `give_turn_award.sql`): 1 weapon accuracy (stat1/stat2, at least
+/// 50 shots in the turn), 2 kill points (stat4 > 0; the game files it under
+/// "kills" when it shows the award), 3 mission victory rate (stat6/stat7, at
+/// least 5 missions in the turn), 4 base captures (stat8 > 0).
+pub const AWARD_CATEGORIES: [&str; 4] = ["accuracy", "kill_points", "win_rate", "base_captures"];
+/// Places per category and turn (`give_turn_award(..., award_limit = 10)`).
+pub const AWARD_PLACES: usize = 10;
+const AWARD_MIN_SHOTS: i64 = 50;
+const AWARD_MIN_MISSIONS: i64 = 5;
 
 /// `[public]` section of the instance configuration.
 #[derive(Debug, Clone)]
@@ -224,6 +240,16 @@ pub struct Battle {
     pub points: Vec<i64>,
 }
 
+/// Sums of one player in one turn of the round (pilot history, awards).
+#[derive(Debug, Clone)]
+pub struct TurnRow {
+    pub player: Uuid,
+    pub turn: i16,
+    /// The side of the player's most played missions in that turn.
+    pub faction: Option<String>,
+    pub stats: [i64; 10],
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SideCounts {
     pub enlisted: i64,
@@ -241,6 +267,16 @@ pub struct Snapshot {
     pub battles: Vec<Battle>,
     pub battles_round: i64,
     pub sides: HashMap<String, SideCounts>,
+    /// W527: per player and turn of the round.
+    pub turn_rows: Vec<TurnRow>,
+    /// W527: the latest `PILOT_BATTLES` battles of every player.
+    pub pilot_battles: Vec<Battle>,
+    /// W527: battles per (player, turn, map) for the favourite sector.
+    pub sector_counts: Vec<(Uuid, i16, i16, i64)>,
+    /// W527: battles per turn of the round.
+    pub turn_battles: Vec<(i16, i64)>,
+    /// W527: end of every turn of the round (`settings.period`).
+    pub turn_ends: Vec<(i16, DateTime<Utc>)>,
 }
 
 /// Players that never appear: banned accounts and players with a suspended identity.
@@ -369,8 +405,74 @@ pub async fn collect(pool: &PgPool, battles: usize, round: Option<i16>) -> Resul
         s.last_24h = a;
         s.prev_24h = b;
     }
+
+    // W527: sums per turn (pilot history, awards like give_turn_award, pilot of the turn).
+    let sums = (1..=10).map(|i| format!("SUM(l.stat{i})")).collect::<Vec<_>>().join(", ");
+    let rows: Vec<(Uuid, i16, Option<String>, Vec<i64>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT l.xuid, l.turn, (array_agg(l.faction::text ORDER BY l.stat7 DESC, l.faction))[1],
+                ARRAY[{sums}]::bigint[]
+         FROM public.leaderboard l
+         WHERE l.round = $1 AND l.xuid NOT IN {HIDDEN}
+         GROUP BY l.xuid, l.turn"
+    )))
+    .bind(round)
+    .fetch_all(&mut *tx)
+    .await?;
+    let turn_rows = rows
+        .into_iter()
+        .map(|(player, turn, faction, s)| TurnRow { player, turn, faction, stats: ten(s) })
+        .filter(|r| r.stats.iter().any(|&v| v != 0))
+        .collect();
+    let rows: Vec<(DateTime<Utc>, i16, i16, String, Uuid, Option<String>, Vec<i64>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT g.at, g.turn, g.\"map\", g.faction::text, g.player_id, d.name, g.points
+         FROM (SELECT g.*, row_number() OVER (PARTITION BY g.player_id ORDER BY g.at DESC, g.result_id DESC) AS nth
+               FROM public.gateway_result g
+               WHERE g.kind = 'user_points' AND {open}) g
+         LEFT JOIN core.display_name d ON d.player_id = g.player_id
+         WHERE g.nth <= $2
+         ORDER BY g.at DESC, g.result_id DESC"
+    )))
+    .bind(round)
+    .bind(PILOT_BATTLES as i64)
+    .fetch_all(&mut *tx)
+    .await?;
+    let pilot_battles = rows
+        .into_iter()
+        .map(|(at, turn, map, faction, player, name, points)| Battle { at, turn, map, faction, player, name, points })
+        .collect();
+    let sector_counts: Vec<(Uuid, i16, i16, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT g.player_id, g.turn, g.\"map\", count(*) FROM public.gateway_result g
+         WHERE g.kind = 'user_points' AND {open} GROUP BY g.player_id, g.turn, g.\"map\""
+    )))
+    .bind(round)
+    .fetch_all(&mut *tx)
+    .await?;
+    let turn_battles: Vec<(i16, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT g.turn, count(*) FROM public.gateway_result g WHERE g.kind = 'user_points' AND {open} GROUP BY g.turn"
+    )))
+    .bind(round)
+    .fetch_all(&mut *tx)
+    .await?;
+    let turn_ends: Vec<(i16, DateTime<Utc>)> =
+        sqlx::query_as("SELECT turn, period FROM public.settings WHERE round = $1 ORDER BY turn")
+            .bind(round)
+            .fetch_all(&mut *tx)
+            .await?;
     tx.rollback().await?;
-    Ok(Snapshot { now, period, standings, sectors, battles, battles_round, sides })
+    Ok(Snapshot {
+        now,
+        period,
+        standings,
+        sectors,
+        battles,
+        battles_round,
+        sides,
+        turn_rows,
+        pilot_battles,
+        sector_counts,
+        turn_battles,
+        turn_ends,
+    })
 }
 
 // ---- Building the public document (no database) -------------------------
@@ -427,6 +529,14 @@ impl Placeholders {
             }
             self.used.insert(n);
             self.taken.insert(p, n);
+        }
+    }
+
+    /// Placeholder of a player that `assign` has seen.
+    pub fn label(&self, player: &Uuid) -> String {
+        match self.taken.get(player) {
+            Some(n) => format!("Pilot #{n}"),
+            None => "Pilot".to_owned(),
         }
     }
 
@@ -503,14 +613,130 @@ pub fn default_sector_name(index: usize) -> String {
     format!("Sector {turn}-{slot}")
 }
 
+/// `[a-z0-9]+(-[a-z0-9]+)*`, at most `MAX_SLUG` characters (steelnet checks the same).
+pub fn valid_slug(s: &str) -> bool {
+    (1..=MAX_SLUG).contains(&s.len())
+        && s.split('-').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
+}
+
+/// Slug of a shown name: lower case, every run of other characters becomes one `-`.
+pub fn slug_base(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    // Room for a "-NNN" suffix.
+    out.truncate(MAX_SLUG - 4);
+    let out = out.trim_end_matches('-');
+    if out.is_empty() { "pilot".to_owned() } else { out.to_owned() }
+}
+
+/// Unique slugs for (key, shown name, is placeholder). Real names first, then
+/// placeholders, each in name order; a taken slug gets `-2`, `-3`, ...
+pub fn assign_slugs<K: Copy + Eq + std::hash::Hash + Ord>(list: &[(K, String, bool)]) -> HashMap<K, String> {
+    let mut order: Vec<&(K, String, bool)> = list.iter().collect();
+    order.sort_by(|a, b| a.2.cmp(&b.2).then(a.1.cmp(&b.1)).then(a.0.cmp(&b.0)));
+    let mut taken: HashSet<String> = HashSet::new();
+    let mut out = HashMap::new();
+    for (k, name, _) in order {
+        let base = slug_base(name);
+        let mut slug = base.clone();
+        let mut n = 2;
+        while taken.contains(&slug) {
+            slug = format!("{base}-{n}");
+            n += 1;
+        }
+        taken.insert(slug.clone());
+        out.insert(*k, slug);
+    }
+    out
+}
+
+/// Award places of one turn like `give_turn_award`: per category the indices of
+/// at most `AWARD_PLACES` players, best first. Ratios are integer per mille as in
+/// the SQL; equal values are ordered by the shown name (the game takes any order).
+pub fn turn_award_places(stats: &[[i64; 10]], names: &[&str]) -> [Vec<usize>; 4] {
+    let score = |cat: usize, s: &[i64; 10]| -> Option<i64> {
+        match cat {
+            0 => (s[1] >= AWARD_MIN_SHOTS).then(|| s[0] * 1000 / s[1]),
+            1 => (s[3] > 0).then_some(s[3]),
+            2 => (s[6] >= AWARD_MIN_MISSIONS).then(|| s[5] * 1000 / s[6]),
+            _ => (s[7] > 0).then_some(s[7]),
+        }
+    };
+    std::array::from_fn(|cat| {
+        let mut list: Vec<(i64, usize)> =
+            stats.iter().enumerate().filter_map(|(i, s)| score(cat, s).map(|v| (v, i))).collect();
+        list.sort_by(|a, b| b.0.cmp(&a.0).then(names[a.1].cmp(names[b.1])).then(a.1.cmp(&b.1)));
+        list.into_iter().take(AWARD_PLACES).map(|(_, i)| i).collect()
+    })
+}
+
+/// Closest played sector of one turn: the smallest war-point gap between the two
+/// best sides in the war. (sector index, strict leader, gap in war points, gap in
+/// share points). `None` without a played sector; equal gaps: the first sector.
+pub fn closest_sector(tides: &HashMap<usize, [i64; 3]>, turn: i16) -> Option<(usize, Option<usize>, i64, i64)> {
+    let first = ((turn - 1) * SECTORS_PER_TURN) as usize;
+    let sides = if turn >= RB_START_TURN { 3 } else { 2 };
+    let top2 = |v: &[i64]| {
+        let mut v = v.to_vec();
+        v.sort_unstable_by(|a, b| b.cmp(a));
+        v[0] - v[1]
+    };
+    let mut best: Option<(usize, Option<usize>, i64, i64)> = None;
+    for idx in first..first + SECTORS_PER_TURN as usize {
+        let Some(p) = tides.get(&idx) else { continue };
+        let gap = top2(&p[..sides]);
+        let margin = top2(&sector_share(p, turn)[..sides]);
+        if best.is_none_or(|b| gap < b.2) {
+            best = Some((idx, leader(p), gap, margin));
+        }
+    }
+    best
+}
+
+fn thousands(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 { format!("-{out}") } else { out }
+}
+
+/// Text safe for Discord markdown: no formatting, mention, heading or link characters.
+pub fn md_plain(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '*' | '_' | '~' | '`' | '|' | '>' | '<' | '@' | '[' | ']' | '(' | ')' | '#' | '\\' | ':'))
+        .filter(|c| !c.is_control())
+        .collect()
+}
+
 /// Build the public document. Pure: everything comes from the snapshot.
 pub fn build(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) -> Value {
+    build_all(cfg, snap, names).0
+}
+
+/// The public document plus one file per listed pilot (`<slug>`, document).
+pub fn build_all(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) -> (Value, Vec<(String, Value)>) {
     let period = &snap.period;
     // Placeholder numbers for everyone who may appear, before any is used.
     let mut everyone: Vec<Uuid> = snap.standings.iter().map(|s| s.player).collect();
     everyone.extend(snap.battles.iter().map(|b| b.player));
+    everyone.extend(snap.turn_rows.iter().map(|r| r.player));
+    everyone.extend(snap.pilot_battles.iter().map(|b| b.player));
     names.assign(&everyone);
-    let mut shown = |player: &Uuid, name: Option<&str>| clean_name(name).unwrap_or_else(|| names.name(player));
+    let minute = |t: DateTime<Utc>| ts(t - chrono::Duration::seconds(t.timestamp().rem_euclid(60)));
+    // Everyone has a number now: read-only from here on.
+    let names: &Placeholders = names;
+    let shown = |player: &Uuid, name: Option<&str>| clean_name(name).unwrap_or_else(|| names.label(player));
 
     // Sectors of the round.
     let mut tide_by_index: HashMap<usize, [i64; 3]> = HashMap::new();
@@ -605,17 +831,64 @@ pub fn build(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) -> V
     // Full ranking list: every ranked pilot (up to `ranking_pilots`) with the
     // round and the current turn, so the page can rank any category and side.
     let listed = ranking_selection(&rows.iter().map(|(_, s)| *s).collect::<Vec<_>>(), cfg.ranking_pilots);
+    // W527: slugs (profile links) for the listed pilots, unique in the document.
+    let slugs: HashMap<Uuid, String> = assign_slugs(
+        &rows
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| listed.contains(i))
+            .map(|(_, (n, s))| (s.player, n.clone(), clean_name(s.name.as_deref()).is_none()))
+            .collect::<Vec<_>>(),
+    );
+    let mut turn_names: HashMap<Uuid, String> = rows.iter().map(|(n, s)| (s.player, n.clone())).collect();
+    for r in &snap.turn_rows {
+        if !turn_names.contains_key(&r.player) {
+            let n = names.label(&r.player);
+            turn_names.insert(r.player, n);
+        }
+    }
+
+    // W527: awards of every closed turn, recomputed from the leaderboard with the
+    // rules of give_turn_award (the `awards` table loses a row once the pilot
+    // claims the award in the game, so it is no history).
+    let mut by_turn: HashMap<i16, Vec<&TurnRow>> = HashMap::new();
+    for r in &snap.turn_rows {
+        by_turn.entry(r.turn).or_default().push(r);
+    }
+    let closed: Vec<i16> = (1..period.turn.min(TURNS_PER_ROUND + 1)).collect();
+    // player -> [(turn, category, place)]
+    let mut awards_of: HashMap<Uuid, Vec<(i16, usize, usize)>> = HashMap::new();
+    for &t in &closed {
+        let Some(list) = by_turn.get(&t) else { continue };
+        let stats: Vec<[i64; 10]> = list.iter().map(|r| r.stats).collect();
+        let nm: Vec<&str> = list.iter().map(|r| turn_names[&r.player].as_str()).collect();
+        for (cat, places) in turn_award_places(&stats, &nm).iter().enumerate() {
+            for (place, &i) in places.iter().enumerate() {
+                awards_of.entry(list[i].player).or_default().push((t, cat, place + 1));
+            }
+        }
+    }
+    for v in awards_of.values_mut() {
+        v.sort();
+    }
+
     let pilots: Vec<Value> = rows
         .iter()
         .enumerate()
         .filter(|(i, _)| listed.contains(i))
         .map(|(_, (n, s))| {
-            json!({
+            let mut p = json!({
                 "pilot": n,
                 "side": s.faction.as_deref().filter(|f| side_index(f).is_some()),
                 "round": stat_block(&s.stats),
                 "turn": if s.turn_stats.iter().any(|&v| v != 0) { stat_block(&s.turn_stats) } else { Value::Null },
-            })
+                "slug": slugs[&s.player],
+            });
+            if let Some(a) = awards_of.get(&s.player) {
+                // Compact: [turn, category index (AWARD_CATEGORIES), place].
+                p["awards"] = a.iter().map(|&(t, c, r)| json!([t, c, r])).collect();
+            }
+            p
         })
         .collect();
     let ranked_turn = snap.standings.iter().filter(|s| s.turn_stats.iter().any(|&v| v != 0)).count();
@@ -659,7 +932,7 @@ pub fn build(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) -> V
                 Value::Null
             };
             json!({
-                "at": ts(b.at.with_timezone(&Utc) - chrono::Duration::seconds(b.at.timestamp() % 60)),
+                "at": minute(b.at),
                 "turn": b.turn,
                 "sector": sector_of(b.turn, b.map, cfg.map_base),
                 "side": side_index(&b.faction).map(|i| SIDES[i]),
@@ -671,9 +944,176 @@ pub fn build(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) -> V
         })
         .collect();
 
+    // W527: one entry per turn so far (war chart, turn reports).
+    let ends: HashMap<i16, DateTime<Utc>> = snap.turn_ends.iter().copied().collect();
+    let tb: HashMap<i16, i64> = snap.turn_battles.iter().copied().collect();
+    let sector_name = |i: usize| cfg.sector_names.get(i).cloned().unwrap_or_else(|| default_sector_name(i));
+    let side_name = |i: usize| md_plain(&cfg.side_names[i]);
+    let turns: Vec<Value> = (1..=period.turn.min(TURNS_PER_ROUND))
+        .map(|t| {
+            let first = ((t - 1) * SECTORS_PER_TURN) as usize;
+            let in_war = if t >= RB_START_TURN { 3 } else { 2 };
+            let mut wp = [0i64; 3];
+            for i in first..first + SECTORS_PER_TURN as usize {
+                if let Some(p) = tide_by_index.get(&i) {
+                    for k in 0..3 {
+                        wp[k] += p[k];
+                    }
+                }
+            }
+            let upto: Vec<SectorTide> =
+                in_round.iter().filter(|x| (x.map_id - cfg.map_base) / SECTORS_PER_TURN < t).cloned().collect();
+            let inf = influence(&upto, t);
+            let best = by_turn.get(&t).and_then(|list| {
+                list.iter()
+                    .filter(|r| r.stats[3] > 0)
+                    .max_by(|a, b| {
+                        a.stats[3]
+                            .cmp(&b.stats[3])
+                            .then(a.stats[2].cmp(&b.stats[2]))
+                            .then(turn_names[&b.player].cmp(&turn_names[&a.player]))
+                    })
+                    .copied()
+            });
+            let pilot = best.map(|r| {
+                let mut v = json!({
+                    "pilot": turn_names[&r.player],
+                    "side": r.faction.as_deref().filter(|f| side_index(f).is_some()),
+                    "points": r.stats[3],
+                    "kills": r.stats[2],
+                });
+                if let Some(sl) = slugs.get(&r.player) {
+                    v["slug"] = json!(sl);
+                }
+                v
+            });
+            let close = closest_sector(&tide_by_index, t);
+            let state = if t < period.turn { "closed" } else { "contested" };
+            let battles_t = tb.get(&t).copied().unwrap_or(0);
+            let mut e = json!({
+                "turn": t,
+                "state": state,
+                "ends_at": ends.get(&t).map(|x| minute(*x)),
+                "battles": battles_t,
+                "war_points": {"hsd": wp[0], "prf": wp[1], "rb": wp[2]},
+                "influence": {"hsd": inf[0], "prf": inf[1], "rb": inf[2]},
+                "pilot": pilot,
+                "closest": close.map(|(i, l, g, m)| json!({"sector": i, "leader": l.map(|l| SIDES[l]), "gap": g, "margin": m})),
+            });
+            if state == "closed" {
+                // Ready-made Discord text for the steward; nothing posts it automatically.
+                let mut md = format!("**Turn {t} report**");
+                if !cfg.season.is_empty() {
+                    md.push_str(&format!(" · {} · round {}", md_plain(&cfg.season), period.round));
+                }
+                md.push('\n');
+                for i in first..first + SECTORS_PER_TURN as usize {
+                    let line = match tide_by_index.get(&i) {
+                        None => "not played".to_owned(),
+                        Some(p) => {
+                            let share = sector_share(p, t);
+                            let who = leader(p).map(|l| format!("**{}**", side_name(l))).unwrap_or("drawn".into());
+                            let parts: Vec<String> = (0..in_war).map(|k| format!("{} {}%", side_name(k), share[k])).collect();
+                            format!("{who} ({})", parts.join(" / "))
+                        }
+                    };
+                    md.push_str(&format!("- {}: {line}\n", md_plain(&sector_name(i))));
+                }
+                let inf_parts: Vec<String> = (0..in_war).map(|k| format!("{} {}%", side_name(k), inf[k])).collect();
+                md.push_str(&format!("War influence after the turn: {}\n", inf_parts.join(" · ")));
+                if let Some(r) = best {
+                    let side =
+                        r.faction.as_deref().and_then(side_index).map(|i| format!(" ({})", side_name(i))).unwrap_or_default();
+                    md.push_str(&format!(
+                        "Pilot of the turn: **{}**{side}, {} kill points\n",
+                        md_plain(&turn_names[&r.player]),
+                        thousands(r.stats[3])
+                    ));
+                }
+                if let Some((i, l, g, _)) = close {
+                    let how = match l {
+                        Some(l) => format!("{} ahead by {} war points", side_name(l), thousands(g)),
+                        None => "drawn".to_owned(),
+                    };
+                    md.push_str(&format!("Closest sector: {}, {how}\n", md_plain(&sector_name(i))));
+                }
+                md.push_str(&format!("Battles: {}", thousands(battles_t)));
+                e["discord_md"] = json!(md);
+            }
+            e
+        })
+        .collect();
+
+    // W527: one file per listed pilot (profile).
+    let mut fav: HashMap<Uuid, (i64, usize)> = HashMap::new();
+    for &(player, turn, map, n) in &snap.sector_counts {
+        if let Some(idx) = sector_of(turn, map, cfg.map_base) {
+            let e = fav.entry(player).or_insert((0, 0));
+            // Most battles; on a tie the later sector.
+            if (n, idx) > *e {
+                *e = (n, idx);
+            }
+        }
+    }
+    let battle_json = |b: &Battle| {
+        let st = |i: usize| b.points.get(i).copied().unwrap_or(0);
+        let result =
+            if b.points.len() == 10 && st(6) > 0 { Value::from(if st(5) > 0 { "win" } else { "loss" }) } else { Value::Null };
+        json!({
+            "at": minute(b.at),
+            "turn": b.turn,
+            "sector": sector_of(b.turn, b.map, cfg.map_base),
+            "side": side_index(&b.faction).map(|i| SIDES[i]),
+            "result": result,
+            "points": st(3),
+            "kills": st(2),
+        })
+    };
+    let mut pilot_docs: Vec<(String, Value)> = Vec::new();
+    for (i, (n, s)) in rows.iter().enumerate() {
+        if !listed.contains(&i) {
+            continue;
+        }
+        let mut hist: Vec<&TurnRow> = snap.turn_rows.iter().filter(|r| r.player == s.player).collect();
+        hist.sort_by_key(|r| r.turn);
+        let history: Vec<Value> = hist
+            .iter()
+            .map(|r| {
+                let mut v = stat_block(&r.stats);
+                v["turn"] = json!(r.turn);
+                v["side"] = json!(r.faction.as_deref().filter(|f| side_index(f).is_some()));
+                v
+            })
+            .collect();
+        let battles: Vec<Value> =
+            snap.pilot_battles.iter().filter(|b| b.player == s.player).take(PILOT_BATTLES).map(battle_json).collect();
+        let awards: Vec<Value> = awards_of
+            .get(&s.player)
+            .map(|a| a.iter().map(|&(t, c, r)| json!({"turn": t, "category": AWARD_CATEGORIES[c], "rank": r})).collect())
+            .unwrap_or_default();
+        let slug = slugs[&s.player].clone();
+        pilot_docs.push((
+            slug.clone(),
+            json!({
+                "schema": SCHEMA,
+                "campaign": {"id": cfg.campaign},
+                "period": {"round": period.round, "turn": period.turn},
+                "pilot": n,
+                "slug": slug,
+                "side": s.faction.as_deref().filter(|f| side_index(f).is_some()),
+                "round": stat_block(&s.stats),
+                "turn": if s.turn_stats.iter().any(|&v| v != 0) { stat_block(&s.turn_stats) } else { Value::Null },
+                "history": history,
+                "favorite_sector": fav.get(&s.player).map(|&(n, i)| json!({"sector": i, "battles": n})),
+                "battles": battles,
+                "awards": awards,
+            }),
+        ));
+    }
+
     let turn_minutes = cfg.turn_length.as_secs() / 60;
     let started = period.ends_at - chrono::Duration::seconds(cfg.turn_length.as_secs() as i64);
-    json!({
+    let doc = json!({
         "schema": SCHEMA,
         "generated_at": ts(snap.now),
         "campaign": {"id": cfg.campaign, "name": cfg.name, "season": cfg.season},
@@ -695,7 +1135,10 @@ pub fn build(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) -> V
             "ranked_pilots_turn": ranked_turn,
             "battles_round": snap.battles_round,
         },
-    })
+        "turns": turns,
+        "awards": {"categories": AWARD_CATEGORIES, "per_turn": AWARD_PLACES, "turns": closed},
+    });
+    (doc, pilot_docs)
 }
 
 /// The ten sums of one pilot under their public names (`pilots[].round` / `.turn`).
@@ -770,6 +1213,58 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// Directory of the pilot files: `<out_dir>/<campaign>/pilots`.
+pub fn pilot_dir(cfg: &PublicConfig) -> PathBuf {
+    cfg.out_dir.join(&cfg.campaign).join("pilots")
+}
+
+/// Render the pilot files (size limit each). Any error: nothing is written.
+pub fn render_pilots(docs: &[(String, Value)]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    docs.iter()
+        .map(|(slug, doc)| {
+            if !valid_slug(slug) {
+                return Err(format!("bad pilot slug {slug:?}"));
+            }
+            let mut out = serde_json::to_vec(doc).map_err(|e| e.to_string())?;
+            out.push(b'\n');
+            if out.len() > MAX_PILOT_BYTES {
+                return Err(format!("pilot file {slug} too large ({} bytes)", out.len()));
+            }
+            Ok((slug.clone(), out))
+        })
+        .collect()
+}
+
+/// Write the pilot files: changed ones atomically (unchanged files keep their
+/// time stamp, so their ETag stays), then remove the files of pilots that are
+/// no longer listed. Only names of the slug form are ever touched.
+/// Returns (written, removed).
+pub fn sync_pilot_files(dir: &Path, files: &[(String, Vec<u8>)]) -> std::io::Result<(usize, usize)> {
+    std::fs::create_dir_all(dir)?;
+    let mut written = 0;
+    let keep: HashSet<String> = files.iter().map(|(s, _)| format!("{s}.json")).collect();
+    for (slug, data) in files {
+        let path = dir.join(format!("{slug}.json"));
+        if std::fs::read(&path).is_ok_and(|old| old == *data) {
+            continue;
+        }
+        write_atomic(&path, data)?;
+        written += 1;
+    }
+    let mut removed = 0;
+    for e in std::fs::read_dir(dir)? {
+        let e = e?;
+        let Some(name) = e.file_name().to_str().map(str::to_owned) else { continue };
+        let ours = name.strip_suffix(".json").is_some_and(valid_slug)
+            || name.strip_prefix('.').and_then(|n| n.strip_suffix(".json.tmp")).is_some_and(valid_slug);
+        if ours && !keep.contains(&name) && e.file_type()?.is_file() {
+            std::fs::remove_file(e.path())?;
+            removed += 1;
+        }
+    }
+    Ok((written, removed))
+}
+
 /// Key for the placeholder numbers: read, or create once (32 random bytes, 0600).
 pub fn load_or_create_key(path: &Path) -> std::io::Result<Vec<u8>> {
     match std::fs::read(path) {
@@ -804,18 +1299,27 @@ pub async fn run(pool: &PgPool, root: &toml::Table) -> Result<(), Box<dyn std::e
     let cfg = PublicConfig::from_toml(root)?;
     let key = load_or_create_key(&cfg.name_key)?;
     let snap = collect(pool, cfg.battles, None).await?;
-    let doc = build(&cfg, &snap, &mut Placeholders::new(&key, &cfg.season));
+    let (doc, pilots) = build_all(&cfg, &snap, &mut Placeholders::new(&key, &cfg.season));
     let bytes = render(&doc)?;
+    let pilot_files = render_pilots(&pilots)?;
+    // Pilot files first, so every slug in the new document has its file; old
+    // files go only after the document no longer names them.
+    let dir = pilot_dir(&cfg);
+    let (written, _) = sync_pilot_files(&dir, &pilot_files)?;
     let path = cfg.out_file();
     write_atomic(&path, &bytes)?;
+    let (_, removed) = sync_pilot_files(&dir, &pilot_files)?;
     eprintln!(
-        "public export: {} round {} turn {}, {} pilots, {} battles, {} bytes",
+        "public export: {} round {} turn {}, {} pilots, {} battles, {} bytes; pilot files {} ({} written, {} removed)",
         cfg.campaign,
         snap.period.round,
         snap.period.turn,
         snap.standings.len(),
         snap.battles.len(),
-        bytes.len()
+        bytes.len(),
+        pilot_files.len(),
+        written,
+        removed
     );
     Ok(())
 }

@@ -6,7 +6,7 @@ use super::tests::test_pool;
 use chrono::{TimeZone, Utc};
 use serde_json::Value;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
@@ -44,6 +44,15 @@ const KEYS: &[&str] = &[
     "battles_round",
     // W526: all ranking categories of the game, full ranking list with round and turn.
     "hits", "shots", "base_captures", "capture_count", "tippings", "pilots", "ranked_pilots_turn",
+    // W527: profile slugs, awards, turn reports.
+    "slug", "awards", "turns", "ends_at", "closest", "gap", "margin", "discord_md", "categories", "per_turn",
+];
+
+/// Keys of a pilot file (W527).
+const PILOT_KEYS: &[&str] = &[
+    "schema", "campaign", "id", "period", "round", "turn", "pilot", "slug", "side", "hits", "shots", "kills", "points",
+    "deaths", "wins", "sorties", "base_captures", "capture_count", "tippings", "history", "favorite_sector", "sector",
+    "battles", "at", "result", "awards", "category", "rank",
 ];
 
 fn keys(v: &Value, out: &mut BTreeSet<String>) {
@@ -114,6 +123,11 @@ fn snapshot() -> Snapshot {
         battles: vec![battle(1, Some("Ace One"), "hsd", 0, true), battle(2, None, "prf", 2, false), battle(7, None, "rb", 9, true)],
         battles_round: 17,
         sides,
+        turn_rows: Vec::new(),
+        pilot_battles: Vec::new(),
+        sector_counts: Vec::new(),
+        turn_battles: Vec::new(),
+        turn_ends: Vec::new(),
     }
 }
 
@@ -467,12 +481,279 @@ fn public_document_size_is_bounded() {
             points: vec![9_999_999; 10],
         })
         .collect();
-    let doc = build(&max, &snap, &mut Placeholders::new(&[1u8; 32], ""));
+    // W527: turn 8 (seven closed turns), every listed pilot holds all four award
+    // categories in every closed turn (more than the 40 places a turn has), a full history.
+    snap.period.turn = 8;
+    snap.turn_rows = (0..1000u128)
+        .flat_map(|n| {
+            (1..=8i16).map(move |t| TurnRow {
+                player: uid(n),
+                turn: t,
+                faction: Some("prf".into()),
+                stats: [999_999, 1_000_000, 999_999, 9_999_999 - n as i64, 9, 99_999, 99_999, 9_999, 9, 9],
+            })
+        })
+        .collect();
+    snap.pilot_battles = (0..250u128)
+        .flat_map(|n| {
+            (0..12).map(move |_| Battle {
+                at,
+                turn: 8,
+                map: 2,
+                faction: "prf".into(),
+                player: uid(n),
+                name: Some(format!("Pilot{n:011}")),
+                points: vec![9_999_999; 10],
+            })
+        })
+        .collect();
+    snap.sector_counts = (0..1000u128).map(|n| (uid(n), 8, 2, 99_999)).collect();
+    snap.turn_battles = (1..=8).map(|t| (t, 9_999_999)).collect();
+    snap.turn_ends = (1..=8).map(|t| (t, at)).collect();
+    let (doc, files) = build_all(&max, &snap, &mut Placeholders::new(&[1u8; 32], ""));
     assert_eq!(doc["pilots"].as_array().unwrap().len(), 250);
+    assert_eq!(doc["turns"].as_array().unwrap().len(), 8);
     let bytes = render(&doc).expect("the largest configuration fits the size limit");
-    assert!(bytes.len() < MAX_BYTES * 9 / 10, "{} bytes", bytes.len());
+    // W527: slugs, awards and turn reports add about 15 KB; the largest
+    // configuration with every value at 7 digits keeps 5 % room (236 KB).
+    assert!(bytes.len() < MAX_BYTES * 95 / 100, "{} bytes", bytes.len());
+    eprintln!("worst case: document {} bytes", bytes.len());
+    // The default list lengths (25 / 200 / 30) keep more than 20 % room.
+    let root: toml::Table = "[ticket]\ncampaign = \"steelbound-s1\"".parse().unwrap();
+    let (dflt, _) = build_all(&PublicConfig::from_toml(&root).unwrap(), &snap, &mut Placeholders::new(&[1u8; 32], ""));
+    let n = render(&dflt).unwrap().len();
+    assert!(n < MAX_BYTES * 80 / 100, "{n} bytes");
+    eprintln!("worst case with the default list lengths: {n} bytes");
+    let rendered = render_pilots(&files).expect("every pilot file fits its limit");
+    let largest = rendered.iter().map(|(_, b)| b.len()).max().unwrap();
+    assert!(largest < MAX_PILOT_BYTES / 4, "{largest} bytes");
+    eprintln!("worst case: largest pilot file {largest} bytes, {} files", rendered.len());
     let huge = Value::String("x".repeat(MAX_BYTES));
     assert!(render(&huge).is_err());
+}
+
+fn md_has(turn: &Value, text: &str) -> bool {
+    turn["discord_md"].as_str().is_some_and(|m| m.contains(text))
+}
+
+fn row(n: u128, turn: i16, f: &str, stats: [i64; 10]) -> TurnRow {
+    TurnRow { player: uid(n), turn, faction: Some(f.to_owned()), stats }
+}
+
+/// Turn 3 of round 1: turns 1 and 2 are closed.
+fn snapshot_with_turns() -> Snapshot {
+    let mut snap = snapshot();
+    // stats: hits, shots, kills, kill points, deaths, wins, missions, base captures, captures, tippings
+    snap.turn_rows = vec![
+        // Turn 1: Ace best accuracy (60 shots), Dee most kill points, Eve too few shots / missions.
+        row(1, 1, "hsd", [30, 60, 4, 400, 1, 4, 5, 1, 0, 0]),
+        row(4, 1, "hsd", [10, 50, 6, 600, 2, 1, 5, 0, 0, 0]),
+        row(5, 1, "hsd", [40, 49, 9, 0, 0, 4, 4, 2, 0, 0]),
+        row(2, 1, "prf", [5, 10, 1, 100, 3, 0, 1, 0, 0, 0]),
+        // Turn 2: the unnamed PRF pilot wins on kill points; Ace once more.
+        row(2, 2, "prf", [1, 2, 7, 700, 0, 1, 1, 0, 0, 0]),
+        row(1, 2, "hsd", [1, 2, 3, 300, 0, 1, 1, 0, 0, 0]),
+        // Turn 3 (running): no awards yet.
+        row(1, 3, "hsd", [1, 1, 2, 200, 0, 1, 1, 0, 0, 0]),
+        // A hidden player never reaches the snapshot (collect filters it); a
+        // player outside the standings still gets a stable placeholder.
+        row(9, 2, "rb", [0, 0, 1, 50, 0, 0, 1, 0, 0, 0]),
+    ];
+    let at = snap.now;
+    snap.pilot_battles = (0..14)
+        .map(|k| Battle {
+            at: at - chrono::Duration::minutes(k),
+            turn: if k < 4 { 3 } else { 1 },
+            map: (k % 3) as i16,
+            faction: "hsd".into(),
+            player: uid(1),
+            name: Some("Ace One".into()),
+            points: vec![1, 2, 1, 10 + k, 0, 1, 1, 0, 0, 0],
+        })
+        .collect();
+    snap.sector_counts = vec![(uid(1), 1, 0, 3), (uid(1), 1, 1, 9), (uid(1), 3, 0, 9), (uid(1), 9, 0, 99)];
+    snap.turn_battles = vec![(1, 21), (2, 8), (3, 4)];
+    snap.turn_ends = vec![
+        (1, Utc.with_ymd_and_hms(2026, 11, 16, 18, 0, 31).unwrap()),
+        (2, Utc.with_ymd_and_hms(2026, 11, 23, 18, 0, 0).unwrap()),
+        (3, Utc.with_ymd_and_hms(2026, 11, 30, 18, 0, 0).unwrap()),
+    ];
+    snap
+}
+
+#[test]
+fn public_turn_awards_follow_the_game_rules() {
+    // give_turn_award: accuracy needs 50 shots, win rate 5 missions, kill points
+    // and base captures a value above 0; integer per mille; at most 10 places.
+    let stats = [
+        [30, 60, 0, 400, 0, 4, 5, 1, 0, 0],  // 0: 500 per mille, 800 win rate
+        [10, 50, 0, 600, 0, 1, 5, 0, 0, 0],  // 1: 200, 200
+        [40, 49, 0, 0, 0, 4, 4, 2, 0, 0],    // 2: too few shots and missions, no kill points
+        [0, 50, 0, 0, 0, 0, 5, 0, 0, 0],     // 3: 0 accuracy and 0 win rate still rank (as in the SQL)
+    ];
+    let names = ["Ace", "Dee", "Eve", "Zed"];
+    let places = turn_award_places(&stats, &names);
+    assert_eq!(places[0], [0, 1, 3], "accuracy");
+    assert_eq!(places[1], [1, 0], "kill points");
+    assert_eq!(places[2], [0, 1, 3], "win rate");
+    assert_eq!(places[3], [2, 0], "base captures");
+    // Equal values: name order; never more than 10 places.
+    let many: Vec<[i64; 10]> = (0..15).map(|_| [0, 0, 0, 5, 0, 0, 0, 0, 0, 0]).collect();
+    let nm: Vec<String> = (0..15).map(|i| format!("P{:02}", 14 - i)).collect();
+    let refs: Vec<&str> = nm.iter().map(String::as_str).collect();
+    let p = turn_award_places(&many, &refs);
+    assert_eq!(p[1].len(), AWARD_PLACES);
+    assert_eq!(p[1][0], 14, "P00 first");
+    assert_eq!(AWARD_CATEGORIES, ["accuracy", "kill_points", "win_rate", "base_captures"]);
+}
+
+#[test]
+fn public_slugs_are_unique_valid_and_without_ids() {
+    let list = vec![
+        (1u32, "Foo Bar".to_owned(), false),
+        (2, "foo bar".to_owned(), false),
+        (3, "Pilot 1234".to_owned(), false),
+        (4, "Pilot #1234".to_owned(), true),
+        (5, "X".to_owned(), false),
+        (6, "  ".to_owned(), true),
+    ];
+    let s = assign_slugs(&list);
+    assert_eq!(s[&1], "foo-bar");
+    assert_eq!(s[&2], "foo-bar-2");
+    assert_eq!(s[&3], "pilot-1234", "a real name keeps its slug before a placeholder");
+    assert_eq!(s[&4], "pilot-1234-2");
+    assert_eq!(s[&5], "x");
+    assert_eq!(s[&6], "pilot");
+    let all: HashSet<&String> = s.values().collect();
+    assert_eq!(all.len(), list.len(), "unique");
+    assert!(s.values().all(|v| valid_slug(v)), "{s:?}");
+    for bad in ["", "-a", "a-", "a--b", "A", "a_b", "a.json", "../x", &"a".repeat(41)] {
+        assert!(!valid_slug(bad), "{bad:?}");
+    }
+    assert!(valid_slug(&"a".repeat(40)));
+    assert_eq!(slug_base(&"Long Name ".repeat(9)).len() <= MAX_SLUG - 4, true);
+}
+
+#[test]
+fn public_turn_reports_awards_and_pilot_files() {
+    let c = PublicConfig { sector_names: (0..24).map(|i| format!("Name*{i}_[x](y)")).collect(), ..cfg() };
+    let snap = snapshot_with_turns();
+    let (doc, files) = build_all(&c, &snap, &mut Placeholders::new(&[7u8; 32], &c.season));
+    let text = String::from_utf8(render(&doc).unwrap()).unwrap();
+    let mut found = BTreeSet::new();
+    keys(&doc, &mut found);
+    let unknown: Vec<&String> = found.iter().filter(|k| !KEYS.contains(&k.as_str())).collect();
+    assert!(unknown.is_empty(), "keys outside the whitelist: {unknown:?}");
+    assert_no_ids(&text, &(1..=9u128).map(uid).collect::<Vec<_>>());
+
+    // Slugs on every listed pilot, unique.
+    let pilots = doc["pilots"].as_array().unwrap();
+    let slugs: HashSet<&str> = pilots.iter().map(|p| p["slug"].as_str().unwrap()).collect();
+    assert_eq!(slugs.len(), pilots.len());
+    let ace = pilots.iter().find(|p| p["pilot"] == "Ace One").unwrap();
+    assert_eq!(ace["slug"], "ace-one");
+
+    // Awards: closed turns 1 and 2 only.
+    assert_eq!(doc["awards"]["turns"], serde_json::json!([1, 2]));
+    assert_eq!(doc["awards"]["per_turn"], 10);
+    // Ace: turn 1 accuracy 1st, kill points 2nd, win rate 1st, base captures 2nd (Eve 1st); turn 2 kill points 2nd.
+    assert_eq!(ace["awards"], serde_json::json!([[1, 0, 1], [1, 1, 2], [1, 2, 1], [1, 3, 2], [2, 1, 2]]));
+    let dee = pilots.iter().find(|p| p["pilot"] == "Dee").unwrap();
+    assert_eq!(dee["awards"], serde_json::json!([[1, 0, 2], [1, 1, 1], [1, 2, 2]]));
+    let eve = pilots.iter().find(|p| p["pilot"] == "Eve").unwrap();
+    assert_eq!(eve["awards"], serde_json::json!([[1, 3, 1]]), "too few shots and missions: base captures only");
+    assert!(pilots.iter().find(|p| p["pilot"] == "Fay").unwrap().get("awards").is_none());
+
+    // Turns: one entry per turn so far.
+    let turns = doc["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 3);
+    assert_eq!(turns[0]["state"], "closed");
+    assert_eq!(turns[2]["state"], "contested");
+    assert_eq!(turns[0]["ends_at"], "2026-11-16T18:00:00Z", "minute precision");
+    assert_eq!(turns[0]["battles"], 21);
+    // Sectors of turn 1 (map_base 0): maps 0 and 1 -> 500/100 and 100/400.
+    assert_eq!(turns[0]["war_points"], serde_json::json!({"hsd": 600, "prf": 500, "rb": 0}));
+    // Influence after turn 1: HSD and PRF won one sector each, 22 unplayed shared by two.
+    assert_eq!(turns[0]["influence"], serde_json::json!({"hsd": 50, "prf": 50, "rb": 0}));
+    // The running turn equals the side summary.
+    for (i, side) in ["hsd", "prf", "rb"].iter().enumerate() {
+        assert_eq!(turns[2]["influence"][side], doc["sides"][i]["influence"]);
+    }
+    assert_eq!(turns[0]["pilot"]["pilot"], "Dee");
+    assert_eq!(turns[0]["pilot"]["points"], 600);
+    assert_eq!(turns[0]["pilot"]["slug"], "dee");
+    let p2 = turns[1]["pilot"]["pilot"].as_str().unwrap();
+    assert!(p2.starts_with("Pilot #"), "{p2}");
+    assert_eq!(turns[1]["pilot"]["side"], "prf");
+    // Closest sector of turn 1: 100 vs 400 war points (gap 300; shares 37/63, margin 26) beats 500 vs 100 (gap 400).
+    assert_eq!(turns[0]["closest"], serde_json::json!({"sector": 1, "leader": "prf", "gap": 300, "margin": 26}));
+    assert!(md_has(&turns[0], "Closest sector: Name1xy, PRF ahead by 300 war points"));
+    assert_eq!(turns[1]["closest"], Value::Null, "turn 2 has no played sector");
+    assert_eq!(turns[2]["closest"], serde_json::json!({"sector": 6, "leader": null, "gap": 0, "margin": 1}), "a draw (the rounding rest goes to HSD, as in the game)");
+    // Discord text only for closed turns, plain (no markup from names), short.
+    let md = turns[0]["discord_md"].as_str().unwrap();
+    assert!(md.starts_with("**Turn 1 report** · Season 1 · round 1\n"), "{md}");
+    assert!(md.contains("- Name0xy: **HSD** (HSD 67% / PRF 33%)"), "{md}");
+    assert!(md.contains("Pilot of the turn: **Dee** (HSD), 600 kill points"), "{md}");
+    assert!(md.contains("War influence after the turn: HSD 50% · PRF 50%"), "{md}");
+    assert!(md.contains("Battles: 21"));
+    assert!(!md.contains("RB"), "RB is not in the war before turn 3: {md}");
+    assert!(md.len() < 2000);
+    assert!(turns[2].get("discord_md").is_none());
+
+    // Pilot files: every listed pilot, slug = file name, keys whitelisted, no ids.
+    assert_eq!(files.len(), pilots.len());
+    let rendered = render_pilots(&files).unwrap();
+    for (slug, bytes) in &rendered {
+        assert!(valid_slug(slug));
+        assert!(bytes.len() < MAX_PILOT_BYTES);
+        let t = String::from_utf8(bytes.clone()).unwrap();
+        assert_no_ids(&t, &(1..=9u128).map(uid).collect::<Vec<_>>());
+        let v: Value = serde_json::from_str(&t).unwrap();
+        let mut found = BTreeSet::new();
+        keys(&v, &mut found);
+        let unknown: Vec<&String> = found.iter().filter(|k| !PILOT_KEYS.contains(&k.as_str())).collect();
+        assert!(unknown.is_empty(), "pilot keys outside the whitelist: {unknown:?}");
+        assert_eq!(v["slug"], slug.as_str());
+        assert_eq!(v["schema"], 1);
+        assert_eq!(v["campaign"]["id"], "steelbound-s1");
+    }
+    let (_, ace_file) = files.iter().find(|(s, _)| s == "ace-one").unwrap();
+    let h = ace_file["history"].as_array().unwrap();
+    assert_eq!(h.iter().map(|x| x["turn"].as_i64().unwrap()).collect::<Vec<_>>(), [1, 2, 3]);
+    assert_eq!(h[0]["points"], 400);
+    assert_eq!(h[0]["side"], "hsd");
+    assert_eq!(ace_file["battles"].as_array().unwrap().len(), PILOT_BATTLES);
+    assert_eq!(ace_file["battles"][0]["at"], "2026-11-26T12:34:00Z");
+    assert!(ace_file["battles"][0].get("pilot").is_none());
+    // Favourite: 9 battles in sector 1 (turn 1) and sector 6 (turn 3) -> the later one; map 9 is no sector.
+    assert_eq!(ace_file["favorite_sector"], serde_json::json!({"sector": 6, "battles": 9}));
+    assert_eq!(ace_file["awards"][0], serde_json::json!({"turn": 1, "category": "accuracy", "rank": 1}));
+    assert_eq!(ace_file["awards"].as_array().unwrap().len(), 5);
+}
+
+#[test]
+fn public_pilot_files_sync() {
+    let dir = std::env::temp_dir().join(format!("sbc-pilots-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let f = |s: &str, b: &str| (s.to_owned(), b.as_bytes().to_vec());
+    assert_eq!(sync_pilot_files(&dir, &[f("ace", "1"), f("dee", "2")]).unwrap(), (2, 0));
+    std::fs::write(dir.join("README.txt"), "not ours").unwrap();
+    std::fs::write(dir.join("Bad_Name.json"), "not a slug").unwrap();
+    std::fs::write(dir.join(".zed.json.tmp"), "left over").unwrap();
+    let before = std::fs::metadata(dir.join("ace.json")).unwrap().modified().unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    // Ace unchanged (not rewritten), Dee gone, Eve new.
+    assert_eq!(sync_pilot_files(&dir, &[f("ace", "1"), f("eve", "3")]).unwrap(), (1, 2));
+    assert_eq!(std::fs::metadata(dir.join("ace.json")).unwrap().modified().unwrap(), before);
+    assert!(!dir.join("dee.json").exists());
+    assert!(!dir.join(".zed.json.tmp").exists());
+    assert!(dir.join("README.txt").exists() && dir.join("Bad_Name.json").exists(), "foreign files stay");
+    assert_eq!(std::fs::read(dir.join("eve.json")).unwrap(), b"3");
+    assert!(render_pilots(&[("../x".into(), Value::Null)]).is_err(), "bad slug refused");
+    let big = Value::String("x".repeat(MAX_PILOT_BYTES));
+    assert!(render_pilots(&[("x".into(), big)]).is_err(), "size limit");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -678,6 +959,32 @@ async fn db_public_export_hides_banned_suspended_and_annulled() {
     assert_eq!(doc["totals"]["battles_round"], 3);
     // The war tide still holds the hidden players' points (sums of the game); the sector leaders follow it.
     assert_eq!(doc["sectors"][0]["points"]["hsd"], 1100);
+
+    // W527: per-turn sums, pilot battles and battle counts follow the same rules.
+    let seen: HashSet<Uuid> = snap.turn_rows.iter().map(|r| r.player).collect();
+    assert_eq!(seen, HashSet::from([a.0, n.0]), "turn sums: no banned, suspended or fully annulled pilot");
+    let ace_t1 = snap.turn_rows.iter().find(|r| r.player == a.0 && r.turn == 1).unwrap();
+    assert_eq!(ace_t1.faction.as_deref(), Some("hsd"));
+    assert_eq!(ace_t1.stats[3], if turn == 1 { 550 } else { 500 });
+    let pb: HashSet<Uuid> = snap.pilot_battles.iter().map(|b| b.player).collect();
+    assert_eq!(pb, HashSet::from([a.0, n.0]));
+    assert_eq!(snap.pilot_battles.iter().filter(|b| b.player == a.0).count(), 2);
+    let t1 = snap.turn_battles.iter().find(|(t, _)| *t == 1).unwrap().1;
+    assert_eq!(t1, if turn == 1 { 3 } else { 2 });
+    let fav: i64 = snap.sector_counts.iter().filter(|c| c.0 == a.0).map(|c| c.3).sum();
+    assert_eq!(fav, 2);
+    let (_, files) = build_all(&c, &snap, &mut Placeholders::new(&[3u8; 32], "test"));
+    assert_eq!(files.len(), 2);
+    for (_, f) in &files {
+        let t = serde_json::to_string(f).unwrap();
+        assert_no_ids(&t, &[a.0, a.1, n.0, n.1, b.0, b.1, s.0, s.1, x.0, x.1]);
+        for hidden in [&ban, &sus, &ann] {
+            assert!(!t.contains(hidden.as_str()));
+        }
+    }
+    let ace_file = &files.iter().find(|(_, f)| f["pilot"] == ace.as_str()).unwrap().1;
+    assert_eq!(ace_file["battles"].as_array().unwrap().len(), 2);
+    assert_eq!(ace_file["history"][0]["turn"], 1);
     // Read only: the export never writes.
     let mut tx = pool.begin().await.unwrap();
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await.unwrap();
