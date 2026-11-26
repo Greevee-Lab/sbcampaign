@@ -13,6 +13,9 @@
 #
 # The optional seed file (path relative to the release) is applied once per
 # database and recorded like a migration (kind "seed").
+#
+# MIGRATE_STOP_BEFORE=<name> stops before that manifest entry (tests only:
+# builds the state of an older release, e.g. before fork/core_split.sql).
 set -euo pipefail
 
 db=${1:?usage: migrate.sh <database> [seed.sql]}
@@ -68,9 +71,16 @@ apply() {
   applied=$((applied + 1))
 }
 
+stop_before=${MIGRATE_STOP_BEFORE:-}
 while read -r kind name _; do
   case "$kind" in
   '' | '#'*) continue ;;
+  esac
+  if [ -n "$stop_before" ] && [ "$name" = "$stop_before" ]; then
+    echo "$db: stopped before $name (MIGRATE_STOP_BEFORE)"
+    break
+  fi
+  case "$kind" in
   once | repeatable) apply "$kind" "$name" "$sqldir/$name" ;;
   *) echo "unknown kind '$kind' in $manifest" >&2; exit 2 ;;
   esac

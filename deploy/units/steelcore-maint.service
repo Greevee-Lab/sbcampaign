@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Installed by the host admin tool from /opt/steelcore/units (deploy/README.md).
+# No User=/Group=/Slice= lines: the host sets them (user steelcore, steelcore.slice).
+#
+# Oneshot, started by hand only: season reset or core unsplit of the
+# PRODUCTION database (request /etc/steelcore/maint/steelcore.request, plus
+# /etc/steelcore/maint/CONFIRM_PRODUCTION to apply); backup first, service
+# must be stopped. See deploy/README.md, "Season reset".
+[Unit]
+Description=steelcore maintenance of the production database (season reset)
+After=postgresql.service
+
+[Service]
+Type=oneshot
+Environment=MAINT_DATABASES=steelcore
+ExecStart=/bin/bash /opt/steelcore/releases/current/deploy/server/maint.sh steelcore
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=192M
+Nice=10
+
+# Sandbox (the host adds User, Group, Slice, ProtectSystem=strict,
+# ProtectHome, PrivateTmp, NoNewPrivileges and ReadWritePaths on top)
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation
+SystemCallErrorNumber=EPERM
+UMask=0027

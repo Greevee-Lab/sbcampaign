@@ -4,12 +4,25 @@
 # Deploy a CI build of this repository to the campaign server.
 #
 #   deploy/deploy.sh <commit>               deploy the CI artifact of <commit>
+#                                           (both instances, both databases)
+#   deploy/deploy.sh --test <commit>        deploy it to the test instance only
+#                                           (releases/test, database
+#                                           steelcore_test); production stays
 #   deploy/deploy.sh --rollback <release>   switch back to an older release
 #   deploy/deploy.sh --status               run the status check
 #   deploy/deploy.sh --releases             list the releases on the server
 #   deploy/deploy.sh --annul <db> <provider> <external_id> [apply] [suspend]
 #                                           annul the results of one identity
 #                                           (dry run without "apply")
+#   deploy/deploy.sh --reset <db> [apply] [start=<YYYY-MM-DDTHH:MMZ>] [--confirm-production]
+#                                           season reset: empty the campaign,
+#                                           keep players and display names
+#                                           (dry run without "apply"; with
+#                                           "apply": stop, backup, reset, start)
+#   deploy/deploy.sh --unsplit <db> [apply] [--confirm-production]
+#                                           way back from the core split
+#                                           (stops the instance, leaves it
+#                                           stopped for the rollback)
 #
 # Environment:
 #   STEELCORE_SSH      ssh target, e.g. deploy@campaign.example.org (required)
@@ -43,9 +56,55 @@ case "${1:-}" in
   line="$*"
   [[ "$line" =~ ^(steelcore|steelcore_test)\ (steelbound|insignia)\ [0-9A-Fa-fx]{1,18}(\ (apply|suspend))*$ ]] ||
     { echo "usage: deploy.sh --annul <steelcore|steelcore_test> <provider> <external_id> [apply] [suspend]" >&2; exit 2; }
-  remote "set -e; umask 027; mkdir -p /etc/steelcore/annul; echo '$line' > /etc/steelcore/annul/request
+  remote "set -e; umask 027; mkdir -p -m 2770 /etc/steelcore/annul; echo '$line' > /etc/steelcore/annul/request
     sudo steelnet-admin svc start steelcore-annul || true
     sudo steelnet-admin logs steelcore-annul 6"
+  exit $?
+  ;;
+--reset | --unsplit)
+  action=${1#--}
+  db=${2:-}
+  shift 2 || true
+  case "$db" in
+  steelcore) unit=steelcore-maint; svc=steelcore ;;
+  steelcore_test) unit=steelcore-test-maint; svc=steelcore-test ;;
+  *) echo "usage: deploy.sh --$action <steelcore|steelcore_test> [apply] [start=...] [--confirm-production]" >&2; exit 2 ;;
+  esac
+  opts=() apply=false confirm=false
+  for word in "$@"; do
+    case "$word" in
+    apply) apply=true; opts+=(apply) ;;
+    start=*)
+      [ "$action" = reset ] && [[ "${word#start=}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?Z$ ]] ||
+        { echo "start=YYYY-MM-DDTHH:MMZ (reset only)" >&2; exit 2; }
+      opts+=("$word") ;;
+    --confirm-production) confirm=true ;;
+    *) echo "unknown option: $word" >&2; exit 2 ;;
+    esac
+  done
+  if $apply && [ "$db" = steelcore ] && ! $confirm; then
+    echo "applying to the production database needs --confirm-production" >&2
+    exit 2
+  fi
+  line="$action ${opts[*]}"
+  conf=; $confirm && conf="touch /etc/steelcore/maint/CONFIRM_PRODUCTION"
+  if $apply; then
+    restart="sudo steelnet-admin svc start $svc"
+    [ "$action" = unsplit ] && restart="echo '$svc stays stopped: roll back now (deploy.sh --rollback <release before the split>)'"
+    remote "set -e; umask 027; mkdir -p -m 2770 /etc/steelcore/maint
+      echo '$line' > /etc/steelcore/maint/$db.request; $conf
+      sudo steelnet-admin svc stop $svc
+      rc=0; sudo steelnet-admin svc start $unit || rc=\$?
+      sudo steelnet-admin logs $unit 40
+      $restart
+      exit \$rc"
+  else
+    remote "set -e; umask 027; mkdir -p -m 2770 /etc/steelcore/maint
+      echo '$line' > /etc/steelcore/maint/$db.request
+      rc=0; sudo steelnet-admin svc start $unit || rc=\$?
+      sudo steelnet-admin logs $unit 25
+      exit \$rc"
+  fi
   exit $?
   ;;
 --rollback)
@@ -54,11 +113,19 @@ case "${1:-}" in
   remote "bash $root/$rel/deploy/server/activate.sh $rel --rollback"
   exit $?
   ;;
+--test) ;;
 '' | -*)
-  sed -n '4,19p' "$0"
+  sed -n '4,33p' "$0"
   exit 2
   ;;
 esac
+
+mode=
+if [ "$1" = --test ]; then
+  mode=--test
+  shift
+  [ -n "${1:-}" ] || { echo "usage: deploy.sh --test <commit>" >&2; exit 2; }
+fi
 
 sha=$(gh api "repos/$repo/commits/$1" --jq .sha)
 rel=${sha:0:12}
@@ -83,4 +150,4 @@ remote "set -e; umask 022
     mv $root/.incoming-$rel $root/$rel
   fi
   rm -f $root/.incoming-$rel.tar.gz
-  bash $root/$rel/deploy/server/activate.sh $rel"
+  bash $root/$rel/deploy/server/activate.sh $rel $mode"

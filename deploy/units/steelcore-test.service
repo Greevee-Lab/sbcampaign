@@ -5,6 +5,8 @@
 # Test campaign instance: same binary, database steelcore_test (synthetic data
 # only), loopback port 23458, Steelbound gateway (public TLS) if configured.
 # Config: /etc/steelcore/steelcore-test.toml.
+# Runs the release of releases/test: a normal deploy points it at the same
+# release as current, "deploy.sh --test" at a newer one (test first).
 [Unit]
 Description=steelcore test campaign (LoC, database steelcore_test)
 After=network.target postgresql.service
@@ -12,7 +14,7 @@ Wants=postgresql.service
 
 [Service]
 Type=notify
-ExecStart=/opt/steelcore/releases/current/sbcampaign /etc/steelcore/steelcore-test.toml
+ExecStart=/opt/steelcore/releases/test/sbcampaign /etc/steelcore/steelcore-test.toml
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20

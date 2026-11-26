@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! PostgreSQL implementation of [`GatewayCore`] (schema `sql/fork/gateway.sql`,
 //! annulment in `sql/fork/gateway_annul.sql`).
+//!
+//! Game audit and results ledger are campaign data (campaign pool, schema
+//! `public`): a season reset empties them together with the leaderboard they
+//! explain. The annulment function looks the identity up in the core itself.
 
 use super::SbCampaignCore;
 use crate::core_api::{

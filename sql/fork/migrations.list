@@ -11,6 +11,10 @@
 #
 # Upstream data migrations (*_migration.sql) are one-off imports from the old
 # MySQL database and are not listed here.
+#
+# The order is the order of application; a file is found by its name, so a
+# line may move. fork/gateway_annul.sql moved behind fork/core_split.sql
+# because its function refers to schema core.
 once        fork/base_schema.sql
 repeatable  set_award_rank.sql
 repeatable  give_turn_award.sql
@@ -19,5 +23,7 @@ repeatable  shop_drop.sql
 once        fork/identity.sql
 once        fork/core_api.sql
 once        fork/gateway.sql
-repeatable  fork/gateway_annul.sql
 once        fork/shop_catalog.sql
+once        fork/core_split.sql
+repeatable  fork/gateway_annul.sql
+repeatable  fork/season_reset.sql

@@ -3,7 +3,8 @@
 #
 # Collect the parts of the status that need the service user, run by
 # steelcore-status.service (timer, every 10 minutes): database ping, applied
-# migrations, current campaign round/turn, newest backup per database, and a
+# migrations, current campaign round/turn, core size (players, display names),
+# newest backup per database, and a
 # content fingerprint per database (row count + md5 per table, used to compare
 # a restore with its source). Results go to STATUS_DIR as key=value text, which
 # deploy/server/status.sh reads without database access.
@@ -32,12 +33,22 @@ out=$(mktemp "$dir/.status.XXXXXX")
       echo "db.$db.migrations=$(q "$db" 'SELECT count(*) FROM fork_migrations' || echo 0)"
       echo "db.$db.procedures=$(q "$db" "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'")"
       echo "db.$db.period=$(q "$db" "SELECT round || '/' || turn FROM settings ORDER BY round DESC, turn DESC LIMIT 1" || echo none)"
+      # Core (players and display names, schema core since the core split).
+      if [ "$(q "$db" "SELECT to_regclass('core.player') IS NOT NULL")" = t ]; then
+        echo "db.$db.core=$(q "$db" "SELECT (SELECT count(*) FROM core.player) || ' players, ' || (SELECT count(*) FROM core.display_name) || ' display names'")"
+      else
+        echo "db.$db.core=not split"
+      fi
 
       # Fingerprint: one line per table, then one hash over all of them.
       fp=$dir/fingerprint-$db.txt
       : >"$fp.tmp"
+      # Campaign tables (schema public) as "<table>", core tables as "core.<table>".
       for t in $(q "$db" "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename"); do
         q "$db" "SELECT '$t', count(*), md5(coalesce(string_agg(x::text, chr(10) ORDER BY x::text), '')) FROM public.\"$t\" x" >>"$fp.tmp"
+      done
+      for t in $(q "$db" "SELECT tablename FROM pg_tables WHERE schemaname = 'core' ORDER BY tablename"); do
+        q "$db" "SELECT 'core.$t', count(*), md5(coalesce(string_agg(x::text, chr(10) ORDER BY x::text), '')) FROM core.\"$t\" x" >>"$fp.tmp"
       done
       mv "$fp.tmp" "$fp"
       echo "db.$db.fingerprint=$(md5sum <"$fp" | cut -d' ' -f1)"

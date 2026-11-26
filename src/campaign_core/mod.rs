@@ -21,6 +21,8 @@ mod profile_tests;
 mod gateway_tests;
 #[cfg(test)]
 mod shop_tests;
+#[cfg(test)]
+mod reset_tests;
 
 use crate::{
     client::{Client, ClientError, Faction, Language},
@@ -31,24 +33,58 @@ use crate::{
 };
 use sqlx::PgPool;
 
+/// Schema of the core tables (players, identities, display names, provider
+/// accesses, Core API audit), see `sql/fork/core_split.sql`. The campaign
+/// tables stay in `public`.
+pub const CORE_SCHEMA: &str = "core";
+
+/// Most connections the core pool opens (the core sees a few calls a minute).
+const CORE_POOL_MAX: u32 = 4;
+
 /// The campaign core of this server.
 ///
-/// Identity operations use the pool given here; the upstream commands use the
-/// server's global pool (`crate::get_pool()`), which is the same pool in the
-/// running server.
+/// Two pools on the instance database:
+/// - `pool`: the campaign (schema `public`). The upstream commands use the
+///   server's global pool (`crate::get_pool()`), which is the same pool in the
+///   running server.
+/// - `core`: the core (schema [`CORE_SCHEMA`] only, see [`connect_core`]). An
+///   unqualified table name on this pool can only mean a core table, and the
+///   campaign pool cannot see core tables by accident.
+///
+/// The two parts share no foreign key and no transaction: the campaign refers
+/// to the core by value (player_id = account UUID, identity_id).
 #[derive(Clone)]
 pub struct SbCampaignCore {
     pool: PgPool,
+    core: PgPool,
 }
 
 impl SbCampaignCore {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, core: PgPool) -> Self {
+        Self { pool, core }
     }
 
+    /// The campaign pool (schema `public`).
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
+
+    /// The core pool (schema [`CORE_SCHEMA`]).
+    pub fn core_pool(&self) -> &PgPool {
+        &self.core
+    }
+}
+
+/// Opens the core pool: the same server, database and login as `campaign`,
+/// with `search_path` set to the core schema only.
+pub async fn connect_core(campaign: &PgPool) -> Result<PgPool, sqlx::Error> {
+    let options = (*campaign.connect_options())
+        .clone()
+        .options([("search_path", CORE_SCHEMA)]);
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(CORE_POOL_MAX)
+        .connect_with(options)
+        .await
 }
 
 impl CampaignCore for SbCampaignCore {
@@ -59,11 +95,11 @@ impl CampaignCore for SbCampaignCore {
         verified_by: VerifiedBy,
         source: &str,
     ) -> Result<ResolvedIdentity, IdentityError> {
-        identity::resolve_identity(&self.pool, provider, external_id, verified_by, source).await
+        identity::resolve_identity(&self.core, provider, external_id, verified_by, source).await
     }
 
     async fn open_session(&self, client: &mut Client, resolved: &ResolvedIdentity) -> Result<bool, ClientError> {
-        identity::open_session(&self.pool, client, resolved).await
+        identity::open_session(&self.pool, &self.core, client, resolved).await
     }
 
     // War
