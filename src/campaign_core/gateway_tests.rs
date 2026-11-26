@@ -239,7 +239,9 @@ fn db_gateway_pilot_session() {
         let (cmd, p) = transact(&gw, &ticket_a, 0, 0x5024, &set_user_info("GwPilot")).await;
         assert_eq!((cmd, p[0]), (0x6024, 0), "pilot saved");
         let (cmd, p) = transact(&gw, &ticket_a, 0, 0x5025, &[PRF]).await;
-        assert_eq!((cmd, p[0]), (0x6025, 1), "faction chosen (status 1 reloads the garage)");
+        // Status 0: the game stays in the campaign ([campaign] transfer_in_place, default true;
+        // upstream answers 1, which signs the player out so that the garage reloads).
+        assert_eq!((cmd, p[0]), (0x6025, 0), "faction chosen (status 0, transfer in place)");
 
         // B (claiming to be A) sees its own, empty account.
         let (cmd, p) = transact(&gw, &ticket_b, pseudo_xuid(a), 0x1021, &[]).await;

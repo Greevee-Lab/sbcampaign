@@ -60,6 +60,7 @@ of the campaign core of [steelcore](https://github.com/Greevee-Lab/steelcore).
 | Shop catalog: the 31 VT types of the reinforcement shop (faction, cost, limit, turn of release) as a `once` migration with full stock and serials from 1; without it a new pilot cannot buy a VT and MISSION SELECT stays disabled. Upstream fills `shop` with a one-off import from its old database (`sql/shop_migration.sql`) | `sql/fork/shop_catalog.sql`, `sql/fork/migrations.list`, `src/campaign_core/shop_tests.rs` | maybe: a seed file for new installs (see below) |
 | Optional short turns: `[campaign] turn_minutes` (at least 10) replaces the fixed one-week turn and scales the shop drops; at start the running turn is shortened to at most one turn from now. Without the key nothing changes. Meant for the test campaign | `src/campaign_core/turn.rs`, `src/service.rs` (turn length), `src/main.rs` (config field), `deploy/config/steelcore-test.toml.example` | maybe (configurable turn length) |
 | Fix: buying an unlimited VT (`vtstock` NULL) set its stock to 0 (`GREATEST(NULL - n, 0)` is 0 in PostgreSQL), so the VT vanished from every shop until the next restock | `src/command.rs` (`vt_add`) | **yes** (see below) |
+| Changing sides at any time: `SetUserFaction` answers status 0 (the game stays in the campaign, no sign-out), faction rankings count one statistic per player over all sides; `[campaign] transfer_in_place` / `rank_per_player` (default `true`, `false` = upstream) | `src/campaign_core/faction_swap.rs`, `src/campaign_core/faction_swap_tests.rs`, `src/command.rs` (`set_user_faction`, `rank_values`, `rank_count_internal`), `src/main.rs` (config field), `deploy/config/*.example` | maybe (as an option) |
 | Core split: players, identities, display names, accesses, idempotency keys and the Core API audit move into schema `core` (takeover with row count and md5 check, way back, own connection pool with `search_path = core`); the campaign keeps schema `public` and refers to the core by value only | `sql/fork/core_split.sql`, `sql/fork/core_unsplit.sql`, `sql/fork/gateway_annul.sql` (schema-qualified), `src/campaign_core/mod.rs` (`connect_core`), `src/campaign_core/identity.rs`, `src/campaign_core/profile.rs`, `src/main.rs` (open the core pool), `tools/test_core_split.sh` | no |
 | Season reset that keeps the core: `campaign_reset()` empties every campaign table, refills the shop, starts round 1 / turn 1 and checks that the core did not change; maintenance units with backup first; restore keeps the core unless asked; test-first deploy (`releases/test`, `deploy.sh --test`) | `sql/fork/season_reset.sql`, `deploy/server/maint.sh`, `deploy/server/restore.sh`, `deploy/server/activate.sh`, `deploy/deploy.sh`, `deploy/units/steelcore-maint.service`, `deploy/units/steelcore-test-*.service`, `src/campaign_core/reset_tests.rs`, `tools/test_activate.sh` | no |
 
@@ -329,6 +330,40 @@ at the start of a round (upstream rules). The production season does not
 set the key. Use at least 120 minutes: the game does not apply combat results
 to the force map in the last hour of a turn (its news text says so), so with
 one-hour turns no result would count.
+
+## Changing sides at any time
+
+With few players a campaign evening is only balanced when pilots can move to
+the other side whenever they like. The game transfers a pilot in the
+Enlistment Office (`SetUserFaction`, `0x5025`), but it opens that office for a
+pilot with a side only in turns 3 to 6. The Steelbound client keeps the office
+open in every turn and, after a transfer, opens the campaign menu instead of
+the main menu; that menu loads the pilot and the garage of the new side from
+the server again (`VtOwned` + `GetUserInfo`, the same way as after signing in).
+Two small patches, switch `loc_camp_faction_swap`, on by default. There is no
+cooldown and no limit. Module `src/campaign_core/faction_swap.rs`, two
+optional `[campaign]` keys:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `transfer_in_place` | `true` | The answer to `SetUserFaction` is status 0, the game's own success path: it stores the new side in the pilot, saves the pilot (`0x5024`), shows "Pilot transferred to the ..." and leaves the Enlistment Office (Steelbound client: to the campaign menu, which reloads pilot and garage). `false` = upstream: status 1, which the game treats as an error and signs the player out (the garage then reloads at the next sign-in). An unpatched game returns to the main menu with the old garage still in its pilot record until a garage screen asks for `VtOwned` again. |
+| `rank_per_player` | `true` | One statistic per player over all sides. A faction ranking (`RankValues`, `RankCountFaction` with a faction) lists the pilots who are in that faction now, each with the sum of all their leaderboard rows. The global ranking and the awards already sum per player. `false` = upstream: a faction ranking counts only the points scored for that faction. |
+
+What stays per side: the garage (`garage.faction`; every side keeps its own
+VTs, a transfer moves nothing) and the shop. A battle counts for the side it
+was fought for: the leaderboard row keeps the faction of the result
+(`AddUserPoint` uses the faction at the time of the result) and the war tide
+uses the faction the game reports (`AddMissionPoint`). The pilot record
+(rank, VT and supply points, combat points) is one per player anyway.
+
+How the game answers `0x6025` (read from the Line of Contact XBE, function
+`0x112C70` and `0x11FF70`): status 0 = success, 2/3/4 = "could not be
+transferred" messages (limit of transfers reached, transfer period ended,
+force not recruiting), 5 = another message, anything else = campaign error
+with sign-out. Upstream answers 1 on purpose ("to kick the user out of
+Campaign so that their garage reloads correctly"). The tests in
+`src/campaign_core/faction_swap_tests.rs` check the garages per side over
+two transfers, the status, one statistic per player and the points per side.
 
 ## Note for upstream: unlimited VT stock
 

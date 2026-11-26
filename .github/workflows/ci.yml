@@ -114,6 +114,8 @@ jobs:
           grep -q "db_gateway_results_plausibility_annul ... ok" dbtest.log
           grep -q "db_new_pilot_can_buy_a_starting_vt ... ok" dbtest.log
           grep -q "db_core_survives_season_reset ... ok" dbtest.log
+          grep -q "db_swap_keeps_a_garage_per_side ... ok" dbtest.log
+          grep -q "db_one_statistic_per_player_over_all_sides ... ok" dbtest.log
           createdb backfill_ci
           bash tools/test_identity_backfill.sh backfill_ci
 
