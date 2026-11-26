@@ -354,7 +354,7 @@ VTs, a transfer moves nothing) and the shop. A battle counts for the side it
 was fought for: the leaderboard row keeps the faction of the result
 (`AddUserPoint` uses the faction at the time of the result) and the war tide
 uses the faction the game reports (`AddMissionPoint`). The pilot record
-(rank, VT and supply points, combat points) is one per player anyway.
+(name, rank, combat points, decorations) is one per player anyway.
 
 How the game answers `0x6025` (read from the Line of Contact XBE, function
 `0x112C70` and `0x11FF70`): status 0 = success, 2/3/4 = "could not be
