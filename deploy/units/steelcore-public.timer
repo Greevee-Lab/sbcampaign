@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=steelcore public campaign data, every 2 minutes
+
+[Timer]
+OnActiveSec=30s
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=10s
+Unit=steelcore-public.service
+
+[Install]
+WantedBy=timers.target

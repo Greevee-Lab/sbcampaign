@@ -27,6 +27,8 @@ script takes the ssh target from the environment.
 | `/etc/steelcore/restore/` | drop folder for a decrypted dump (normally empty) | deploy user, service |
 | `/var/lib/steelcore/backups/` | encrypted backups (`<db>-<UTC time>.dump.gpg`) | service |
 | `/var/lib/steelcore/status/` | collected status and table fingerprints | service |
+| `/var/lib/steelcore/public/` | public campaign data `<campaign>.json` (0755/0644, read by steelnet) | service |
+| `/var/lib/steelcore/public-name.key` | secret key of the `Pilot #NNNN` placeholders (0600) | service |
 
 The services run as user `steelcore` in `steelcore.slice` (one core, 512 MB in
 total) and may only write `/var/lib/steelcore` and `/etc/steelcore`. The
@@ -48,6 +50,7 @@ database work runs inside the services below.
 | `steelcore-restore` | oneshot, by hand | restore a decrypted dump from the drop folder |
 | `steelcore-annul` | oneshot, by hand | annul the reported results of one identity (request file) |
 | `steelcore-status` + `.timer` | oneshot, every 10 min | database ping, migrations, newest backup, fingerprints |
+| `steelcore-public` + `.timer` | oneshot, every 2 min | public campaign data of the production database (read only, see "Public campaign data") |
 
 The original protocol listens on loopback only (`bind_ip = "127.0.0.1"`): it
 trusts the XUID the game reports. Public access goes through the Steelbound
@@ -434,6 +437,76 @@ with the Core API (`AdminService.SetIdentitySuspended`).
 `sudo steelnet-admin svc stop steelcore` stops the campaign; clients cannot
 connect until it is started again. To keep it off across reboots also run
 `sudo steelnet-admin svc disable steelcore`. Data stays untouched.
+
+## Public campaign data
+
+The steelcore web page (core.steelbound.dev) shows the campaign map, rankings,
+latest battles and side summaries. On Xbox Live the same campaign data was
+public for everyone. The data path:
+
+```
+steelcore-public.timer (2 min) -> sbcampaign /etc/steelcore/steelcore.toml --public-export
+  -> /var/lib/steelcore/public/<campaign>.json   (atomic: temp file + rename, 0644, <= 256 KiB)
+steelnet --public-api 127.0.0.1:47104 --public-api-dir /var/lib/steelcore/public
+  -> GET /v1/campaigns, GET /v1/campaigns/<campaign>.json   (loopback HTTP only)
+host Caddy: api.core.steelbound.dev -> reverse_proxy 127.0.0.1:47104   (TLS, Let's Encrypt)
+browser on core.steelbound.dev (GitHub Pages) loads the JSON every 60 s (CORS for that origin only)
+```
+
+No new public port, no secrets in any repository, no GitHub key on the server.
+
+**The export** (`src/campaign_core/public.rs`, tests `public_tests.rs`):
+
+- One `REPEATABLE READ READ ONLY` transaction (consistent snapshot, cannot
+  write), `statement_timeout` 20 s. It uses the read rights the `steelcore`
+  role already has (peer login; a separate role would need a separate Linux
+  user, which only the host admin can create). Optional hardening later: a
+  `NOLOGIN` role with column-level `SELECT` on exactly the columns below,
+  `SET ROLE` inside the transaction.
+- Reads `settings` (round, turn, end of the turn), `leaderboard` (sums of the
+  current round), `wartide` (current round), `gateway_result`
+  (`user_points` for the battle feed, `mission_points` for the 24 h trend),
+  `accounts` (side, banned), `core.display_name`, `core.identity` (suspended).
+- Players appear with their display name only. Without one: `Pilot #NNNN`,
+  a keyed hash of (season, player) with the key in `[public] name_key`; the
+  number cannot be traced back without the key and changes with the season.
+- Never in the file: XUIDs, player/identity/provider ids, account names,
+  pilot data, addresses. Banned accounts, suspended identities and annulled
+  results are left out; a pilot with nothing left is not ranked. The war tide
+  stays the game's sum (it is what the game shows in its pie chart).
+- Times are rounded to the minute in the battle feed.
+- Schema `"schema": 1`; fields are only added, a change of meaning needs 2.
+- A failed run leaves the previous file as it is (exit code != 0, journal).
+
+Fields (schema 1): `generated_at`, `campaign {id, name, season}`, `period
+{round, turn, turns_per_round, turn_minutes, turn_started_at, turn_ends_at}`,
+`sides[] {id, name, joins_turn, enlisted, active, pilot_points, war_points,
+sectors_held, influence, trend {last_24h, prev_24h}}`, `sectors[24] {index,
+turn, slot, name, state (closed|contested|upcoming), played, points, share,
+leader}`, `leaderboards {overall, hsd, prf, rb}[] {rank, pilot, side, points,
+kills, deaths, wins, sorties, captures}`, `battles[] {at, turn, sector, side,
+pilot, result (win|loss|null), points, kills}`, `totals {ranked_pilots,
+battles_round}`.
+
+Meaning of `leaderboard.stat1..10` (upstream rank categories,
+`src/command.rs`): 1 hits, 2 shots (accuracy = 1/2), 3 kills, 4 kill points,
+5 deaths, 6 mission victories, 7 missions played, 8 base captures, 9 capture
+count, 10 tippings. The page ranks by kill points, then kills.
+
+**Setup** (once, production database only):
+
+1. `[public]` section in `/etc/steelcore/steelcore.toml` (see
+   `deploy/config/steelcore.toml.example`).
+2. Install `steelcore-public.service` + `.timer` with the admin tool, enable
+   the timer. First run by hand: `sudo steelnet-admin svc start
+   steelcore-public`, then check the journal line `public export: ...`.
+3. steelnet must be able to read the directory: `/var/lib/steelcore` needs
+   `o+x` (or an ACL `u:steelnet:x`), `/var/lib/steelcore/public` is created
+   0755. The key file stays 0600.
+4. steelnet switch, Caddy entry and DNS: steelnet `deploy/README.md` (W524)
+   and `deploy/caddy-api.core.example`.
+
+Check locally: `curl -s http://127.0.0.1:47104/v1/campaigns` on the server.
 
 ## Logs
 

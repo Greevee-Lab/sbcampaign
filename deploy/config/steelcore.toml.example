@@ -65,6 +65,23 @@ public_keys = []
 max_clock_skew = 60
 max_lifetime = 3600
 
+[public]
+# Public campaign data (`sbcampaign <config> --public-export`, unit
+# steelcore-public + timer; deploy/README.md "Public campaign data").
+# campaign defaults to [ticket] campaign; [a-z0-9-]{1,32}.
+name = "Steelbound Campaign"
+season = "Season 1"
+out_dir = "/var/lib/steelcore/public"
+# Secret key for the "Pilot #NNNN" placeholders (created once, 0600). Never
+# inside out_dir.
+name_key = "/var/lib/steelcore/public-name.key"
+leaderboard_size = 25
+battles = 30
+# Optional: 24 sector names (turn 1 map 1 .. turn 8 map 3), plain labels
+# only. Without them the page shows "Sector 1-A" .. "Sector 8-C".
+# sector_names = [ ... ]
+# side_names = { hsd = "HSD", prf = "PRF", rb = "RB" }
+
 [gateway_steelbound]
 # Steelbound gateway: TLS + sign-in ticket ([ticket] above), then the
 # original protocol for the identity from the ticket. Remove the section (or

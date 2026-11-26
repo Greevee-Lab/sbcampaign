@@ -1,0 +1,7 @@
+# Proposal for the host's Caddy (entered by the host operator, not by deploy.sh).
+# TLS + Let's Encrypt by Caddy; steelnet listens on loopback only (--public-api 127.0.0.1:47104).
+api.core.steelbound.dev {
+	@campaigns path /v1/campaigns /v1/campaigns/*
+	reverse_proxy @campaigns 127.0.0.1:47104
+	respond 404
+}

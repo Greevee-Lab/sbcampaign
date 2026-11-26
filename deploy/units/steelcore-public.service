@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Installed by the host admin tool from /opt/steelcore/units (deploy/README.md).
+# No User=/Group=/Slice= lines: the host sets them (user steelcore, steelcore.slice).
+#
+# Oneshot (timer, every 2 minutes): public campaign data of the production
+# database -> /var/lib/steelcore/public/<campaign>.json (read-only snapshot,
+# display names only; deploy/README.md "Public campaign data"). steelnet
+# serves the file on loopback (--public-api), the host proxy publishes it.
+[Unit]
+Description=steelcore public campaign data export
+After=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/steelcore/releases/current/sbcampaign /etc/steelcore/steelcore.toml --public-export
+# Database over the local Unix socket only; no network at all.
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=64M
+TimeoutStartSec=60
+Nice=15
+
+# Sandbox (the host adds User, Group, Slice, ProtectSystem=strict,
+# ProtectHome, PrivateTmp, NoNewPrivileges and ReadWritePaths on top)
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation
+SystemCallErrorNumber=EPERM
+# The file is public (0644, set by the exporter); the name key stays 0600.
+UMask=0022

@@ -4,9 +4,11 @@
 //! `sbcampaign <config.toml> --public-export` (run by the
 //! `steelcore-public` timer) writes `<out_dir>/<campaign>.json`: period
 //! (round, turn, end of the turn), war tide per sector, side summaries,
-//! rankings, the latest battles. steelnet serves the file unchanged
-//! (`GET /v1/core/public/<campaign>.json`) and the steelcore web page shows
-//! it. On Xbox Live the same campaign data was public for everyone.
+//! rankings, the latest battles. steelnet serves the file unchanged on a
+//! loopback listener (`--public-api`, `GET /v1/campaigns/<campaign>.json`),
+//! the host's TLS proxy publishes it as `api.core.steelbound.dev`, and the
+//! steelcore web page (core.steelbound.dev) loads it in the browser. On Xbox
+//! Live the same campaign data was public for everyone.
 //!
 //! **Privacy rules** (tested in `public_tests.rs`):
 //! - Players appear with their display name (`core.display_name`) only.
@@ -236,6 +238,8 @@ const HIDDEN: &str = "(SELECT xuid FROM public.accounts WHERE banned \
 pub async fn collect(pool: &PgPool, battles: usize, round: Option<i16>) -> Result<Snapshot, sqlx::Error> {
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await?;
+    // A slow query must not hold the snapshot (and its locks) for long; the timer simply tries again.
+    sqlx::query("SET LOCAL statement_timeout = '20s'").execute(&mut *tx).await?;
 
     let now: DateTime<Utc> = sqlx::query_scalar("SELECT now()").fetch_one(&mut *tx).await?;
     let (r, turn, ends_at): (i16, i16, DateTime<Utc>) =
