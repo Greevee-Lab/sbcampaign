@@ -144,6 +144,19 @@ fn public_config_defaults_and_refusals() {
     assert_eq!(short.map_base, 1, "the game sends maps 1..=3 per turn");
 }
 
+/// The shipped config template carries the 24 mission names and the game's map base.
+#[test]
+fn public_config_template_has_sector_names() {
+    let root: toml::Table = include_str!("../../deploy/config/steelcore.toml.example").parse().unwrap();
+    let c = PublicConfig::from_toml(&root).unwrap();
+    assert_eq!(c.map_base, 1);
+    assert_eq!(c.sector_names.len(), 24);
+    assert_eq!(c.sector_names[0], "Sha Wan Hills");
+    assert_eq!(c.sector_names[23], "Defense of Yu Jai Village");
+    let doc = build(&c, &snapshot(), &mut Placeholders::new(&[7u8; 32], &c.season));
+    assert_eq!(doc["sectors"][10]["name"], "San Kuchen Subterranean Fortress");
+}
+
 /// Live data of 26.11.2026: turn 1 had war tide rows and battles on maps 1, 2
 /// and 3. With the default map base every one of them lands in a turn-1
 /// sector, no battle is "unknown" and no turn-2 sector shows points.
