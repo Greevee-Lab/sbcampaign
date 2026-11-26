@@ -152,4 +152,7 @@ remote "set -e; umask 022
     mv $root/.incoming-$rel $root/$rel
   fi
   rm -f $root/.incoming-$rel.tar.gz
+  if [ '$mode' = --test ] && ! grep -q 'releases/test' $root/$rel/deploy/server/activate.sh; then
+    echo 'release $rel cannot be deployed to the test instance alone (no --test in its activate.sh)' >&2; exit 2
+  fi
   bash $root/$rel/deploy/server/activate.sh $rel $mode"
