@@ -12,6 +12,7 @@ pub mod faction_swap;
 pub mod gateway;
 pub mod identity;
 pub mod profile;
+pub mod public;
 pub mod turn;
 
 #[cfg(test)]
@@ -28,6 +29,8 @@ mod trade_tests;
 mod reset_tests;
 #[cfg(test)]
 mod faction_swap_tests;
+#[cfg(test)]
+mod public_tests;
 
 use crate::{
     client::{Client, ClientError, Faction, Language},

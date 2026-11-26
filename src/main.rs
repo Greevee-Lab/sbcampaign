@@ -206,6 +206,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set(database_connect(database_config).await?)
         .unwrap();
 
+    // Fork: one-shot export of the public campaign data (steelcore-public.service), no listeners.
+    if args.get(2).is_some_and(|a| a == "--public-export") {
+        return campaign_core::public::run(get_pool(), &root_config).await;
+    }
+
     let network_config = root_config["network"]
         .as_table()
         .expect("TOML is missing network section");
