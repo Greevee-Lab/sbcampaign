@@ -374,5 +374,8 @@ first token was 0. The fork keeps the protocol and adds the checks:
 Tests: `command::trade_tests` (token, names, pairing, swap check, rendezvous)
 and `campaign_core::trade_tests::db_trade_swaps_owned_vts_and_refuses_theft`
 (a real swap, a refused theft with an accomplice, a refused one-sided claim,
-a token used twice, a trade with oneself).
+a token used twice, a trade with oneself). Verified with two game clients
+against a local instance: a Vitzh traded for a Decider ("Trade successful."),
+both VTs moved with their faction, two audit rows each for TradeUserInfo and
+TradeVT.
 
