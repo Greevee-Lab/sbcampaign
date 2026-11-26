@@ -8,7 +8,7 @@
 #   maint.sh <database>
 #
 # The operator writes one line into MAINT_DIR/<database>.request
-# (deploy.sh --reset / --unsplit does this):
+# (deploy.sh --reset / --unsplit / --report does this):
 #
 #   reset   [apply] [start=<YYYY-MM-DDTHH:MM[:SS]Z>]
 #           Season reset: empty the campaign (pilots, garage, results,
@@ -19,6 +19,8 @@
 #   unsplit [apply]
 #           Way back from the core split (sql/fork/core_unsplit.sql), right
 #           before switching to a release from before the split.
+#   report  Read only: the values the core split checked (core.split_report),
+#           row counts of every campaign and core table, the current period.
 #
 # Without "apply" nothing changes (dry run: prints what would happen).
 # With "apply":
@@ -63,8 +65,8 @@ for word in $rest; do
 done
 case "$action" in
 reset) ;;
-unsplit) [ -z "$start" ] || { echo "unsplit takes no start" >&2; exit 2; } ;;
-*) echo "unknown action: ${action:-<empty>} (reset or unsplit)" >&2; exit 2 ;;
+unsplit | report) [ -z "$start" ] || { echo "$action takes no start" >&2; exit 2; } ;;
+*) echo "unknown action: ${action:-<empty>} (reset, unsplit or report)" >&2; exit 2 ;;
 esac
 
 case "$db" in
@@ -78,6 +80,20 @@ psql_db() { psql -X -q -v ON_ERROR_STOP=1 -d "$db" "$@"; }
 counts() {
   psql_db -At -F ' ' -c "SELECT part, table_name, rows_before FROM campaign_reset(false) WHERE part = 'core'"
 }
+
+if [ "$action" = report ]; then
+  echo "$db: report (read only)"
+  if [ "$(psql_db -At -c "SELECT to_regclass('core.player') IS NOT NULL")" != t ]; then
+    echo "$db: not split"
+    exit 0
+  fi
+  psql_db -At -F ' ' <<'SQL'
+SELECT 'split', name, rows, md5, to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') FROM core.split_report ORDER BY name;
+SELECT part, table_name, rows_before FROM campaign_reset(false);
+SELECT 'settings', round, turn, to_char("period" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') FROM settings;
+SQL
+  exit 0
+fi
 
 if ! $apply; then
   echo "$db: dry run of $action (add 'apply' to change data)"

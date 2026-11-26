@@ -21,7 +21,8 @@ backups=${BACKUP_DIR:-/var/lib/steelcore/backups}
 umask 027
 mkdir -p "$dir"
 
-q() { psql -X -At -v ON_ERROR_STOP=1 -d "$1" -c "$2" 2>/dev/null; }
+# (tr: psql on Windows ends lines with CR LF, for local tests)
+q() { psql -X -At -v ON_ERROR_STOP=1 -d "$1" -c "$2" 2>/dev/null | tr -d '\r'; }
 
 out=$(mktemp "$dir/.status.XXXXXX")
 {

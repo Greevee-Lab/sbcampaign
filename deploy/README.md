@@ -380,9 +380,16 @@ migrations, in one transaction, and only drops the old tables after every
 copied table matched its source in row count and md5. The checked values
 stay in `core.split_report`:
 
-```sql
-SELECT name, rows, md5 FROM core.split_report ORDER BY name;
+```sh
+deploy/deploy.sh --report steelcore      # read only: "split <table> <rows> <md5> <time>", row counts, period
 ```
+
+The md5 uses the formula of the status fingerprint, so each `split <table>`
+line must equal the line `<table>|<rows>|<md5>` of
+`/var/lib/steelcore/status/fingerprint-<db>.txt` taken before the deploy, and
+after the next status run the line `core.<table>|…` as well. The old
+`audit_log` count equals `split audit_log` plus `split campaign audit_log
+(stays)`.
 
 After the split the status check shows `core: <n> players, <m> display names`
 per database, and the fingerprint files list core tables as `core.<table>`.

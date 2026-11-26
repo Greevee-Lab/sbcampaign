@@ -19,6 +19,8 @@
 #                                           keep players and display names
 #                                           (dry run without "apply"; with
 #                                           "apply": stop, backup, reset, start)
+#   deploy/deploy.sh --report <db>          read only: values checked by the core
+#                                           split, row counts, period
 #   deploy/deploy.sh --unsplit <db> [apply] [--confirm-production]
 #                                           way back from the core split
 #                                           (stops the instance, leaves it
@@ -61,7 +63,7 @@ case "${1:-}" in
     sudo steelnet-admin logs steelcore-annul 6"
   exit $?
   ;;
---reset | --unsplit)
+--reset | --unsplit | --report)
   action=${1#--}
   db=${2:-}
   shift 2 || true
@@ -73,7 +75,7 @@ case "${1:-}" in
   opts=() apply=false confirm=false
   for word in "$@"; do
     case "$word" in
-    apply) apply=true; opts+=(apply) ;;
+    apply) [ "$action" != report ] || { echo "report is read only" >&2; exit 2; }; apply=true; opts+=(apply) ;;
     start=*)
       [ "$action" = reset ] && [[ "${word#start=}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?Z$ ]] ||
         { echo "start=YYYY-MM-DDTHH:MMZ (reset only)" >&2; exit 2; }
@@ -115,7 +117,7 @@ case "${1:-}" in
   ;;
 --test) ;;
 '' | -*)
-  sed -n '4,33p' "$0"
+  sed -n '4,34p' "$0"
   exit 2
   ;;
 esac

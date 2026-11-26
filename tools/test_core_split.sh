@@ -48,6 +48,14 @@ SELECT 'api_access', count(*), md5(coalesce(string_agg(ROW(access_id, provider_i
 SELECT 'api_idempotency', count(*), md5(coalesce(string_agg(ROW(access_id, key, method, request_hash, response, created_at)::text, chr(10) ORDER BY access_id, key), '')) FROM $s.api_idempotency;
 SQL
 }
+# The fingerprint formula of deploy/server/collect-status.sh (whole row as
+# text, sorted), which the split records in core.split_report.
+fp_rows() { # <schema>
+  local t
+  for t in provider player identity display_name display_name_reservation display_name_blocklist api_access api_idempotency; do
+    q "SELECT '$t', count(*), md5(coalesce(string_agg(x::text, chr(10) ORDER BY x::text), '')) FROM $1.$t x"
+  done
+}
 # Core audit rows without their id (the way back renumbers them).
 audit_core() { # <schema> <filter>
   q "SELECT count(*), md5(coalesce(string_agg(ROW(at, source, action, identity_id, player_id, detail, access_id, provider_id, method, outcome)::text, chr(10) ORDER BY at, audit_id), '')) FROM $1.audit_log WHERE $2"
@@ -126,6 +134,10 @@ SQL
 
 pg_dump -Fc --no-owner --no-privileges -d "$db" -f "$work/presplit.dump"
 fingerprint public >"$work/before.txt"
+fp_rows public >"$work/before_rows.txt"
+# The operator's view: the fingerprint file of the status collector.
+STATUS_DIR=$work/status STATUS_DBS=$db BACKUP_DIR=$work/none bash "$src/deploy/server/collect-status.sh" >/dev/null
+tr -d '\r' <"$work/status/fingerprint-$db.txt" >"$work/fp_before.txt"
 audit_core public "$CORE_AUDIT" >"$work/audit_before.txt"
 game_audit_before=$(q "SELECT count(*) FROM audit_log WHERE action = 'game_write'")
 campaign_before=$(q "SELECT md5(string_agg(x::text, chr(10) ORDER BY x::text)) FROM accounts x")
@@ -141,10 +153,23 @@ fingerprint core >"$work/after.txt"
 diff "$work/before.txt" "$work/after.txt" >/dev/null || { diff "$work/before.txt" "$work/after.txt" >&2; fail "core differs after the takeover"; }
 audit_core core true >"$work/audit_after.txt"
 cmp -s "$work/audit_before.txt" "$work/audit_after.txt" || fail "core audit differs after the takeover"
-# The split's own report says the same.
+# The split's own report says the same, in the operator's fingerprint formula
+# (taken before the deploy, compared with the report after it).
 while read -r name n h; do
   [ "$(q "SELECT rows || ' ' || md5 FROM core.split_report WHERE name = '$name'")" = "$n $h" ] || fail "split_report $name"
-done <"$work/before.txt"
+done <"$work/before_rows.txt"
+fp_rows core | cmp -s - "$work/before_rows.txt" || fail "core fingerprint (collector formula) differs"
+STATUS_DIR=$work/status STATUS_DBS=$db BACKUP_DIR=$work/none bash "$src/deploy/server/collect-status.sh" >/dev/null
+tr -d '\r' <"$work/status/fingerprint-$db.txt" >"$work/fp_after.txt"
+for t in provider player identity display_name display_name_reservation display_name_blocklist api_access api_idempotency; do
+  b=$(grep "^$t|" "$work/fp_before.txt" | cut -d'|' -f2-)
+  a=$(grep "^core\.$t|" "$work/fp_after.txt" | cut -d'|' -f2-)
+  [ -n "$b" ] && [ "$b" = "$a" ] || fail "fingerprint file: $t before ($b) <> core.$t after ($a)"
+done
+for t in accounts garage leaderboard gateway_result settings shop wartide awards graveyard; do
+  [ "$(grep "^$t|" "$work/fp_before.txt")" = "$(grep "^$t|" "$work/fp_after.txt")" ] || fail "fingerprint file: campaign table $t changed"
+done
+grep -q "core=$players players, " "$work/status/status.txt" || fail "status: core line"
 [ "$(q "SELECT count(*) FROM pg_tables WHERE schemaname = 'public' AND tablename IN ('player', 'identity', 'provider', 'display_name', 'display_name_reservation', 'display_name_blocklist', 'api_access', 'api_idempotency')")" = 0 ] ||
   fail "old core tables still in public"
 [ "$(q "SELECT count(*) FROM audit_log")" = "$game_audit_before" ] || fail "campaign audit rows changed"
@@ -177,8 +202,12 @@ gpg --batch --quiet --passphrase '' --quick-add-key "$fpr" cv25519 encr never 2>
 gpg --batch --armor --export "$fpr" >"$BACKUP_PUBKEY"
 core_fp=$(q "SELECT campaign_reset_core_fingerprint()" | md5sum | cut -d' ' -f1)
 
+echo "report" >"$MAINT_DIR/$db.request"
+bash "$src/deploy/server/maint.sh" "$db" | tr -d '\r' >"$work/report.txt"
+grep -q "^split player $players " "$work/report.txt" || fail "report: split player"
+grep -q "^core display_name " "$work/report.txt" || fail "report: core counts"
 echo "reset" >"$MAINT_DIR/$db.request"
-bash "$src/deploy/server/maint.sh" "$db" >"$work/dry.txt"
+bash "$src/deploy/server/maint.sh" "$db" | tr -d '\r' >"$work/dry.txt"
 [ ! -e "$MAINT_DIR/$db.request" ] || fail "request not deleted"
 grep -q "^campaign accounts $players$" "$work/dry.txt" || fail "dry run: accounts"
 [ "$(q "SELECT count(*) FROM accounts")" = "$players" ] || fail "dry run changed data"

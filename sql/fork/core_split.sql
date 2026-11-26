@@ -22,8 +22,9 @@
 -- Takeover of existing data, all in the one transaction migrate.sh opens:
 --   1. create schema core and its tables,
 --   2. copy every core table, then compare row count and an md5 over all rows
---      (ordered by primary key) between source and copy; any difference
---      aborts the transaction and nothing changes,
+--      between source and copy (the fingerprint formula of
+--      deploy/server/collect-status.sh); any difference aborts the
+--      transaction and nothing changes,
 --   3. record the checked values in core.split_report,
 --   4. only then drop the foreign keys from campaign tables to the old core
 --      tables, delete the moved audit rows and drop the old core tables.
@@ -177,10 +178,14 @@ BEGIN
                        t.name, t.cols,
                        CASE WHEN t.name = 'audit_log' THEN 'OVERRIDING SYSTEM VALUE' ELSE '' END,
                        t.cols, t.name, t.filter);
-        EXECUTE format('SELECT count(*), md5(coalesce(string_agg(ROW(%s)::text, chr(10) ORDER BY %s), '''')) FROM public.%I WHERE %s',
-                       t.cols, t.pk, t.name, t.filter) INTO src_n, src_h;
-        EXECUTE format('SELECT count(*), md5(coalesce(string_agg(ROW(%s)::text, chr(10) ORDER BY %s), '''')) FROM core.%I',
-                       t.cols, t.pk, t.name) INTO dst_n, dst_h;
+        -- Same formula as the fingerprint of deploy/server/collect-status.sh
+        -- (whole row as text, sorted), so the operator can compare these
+        -- values with the fingerprint file taken before the deploy. Source
+        -- and copy have the same columns in the same order.
+        EXECUTE format('SELECT count(*), md5(coalesce(string_agg(x::text, chr(10) ORDER BY x::text), '''')) FROM public.%I x WHERE %s',
+                       t.name, t.filter) INTO src_n, src_h;
+        EXECUTE format('SELECT count(*), md5(coalesce(string_agg(x::text, chr(10) ORDER BY x::text), '''')) FROM core.%I x',
+                       t.name) INTO dst_n, dst_h;
         IF src_n <> dst_n OR src_h <> dst_h THEN
             RAISE EXCEPTION 'core split: % differs after copy (rows % -> %, md5 % -> %)', t.name, src_n, dst_n, src_h, dst_h;
         END IF;
@@ -194,10 +199,8 @@ BEGIN
         RAISE EXCEPTION 'core split: audit rows do not add up (% + % <> %)', dst_n, audit_stays, audit_total;
     END IF;
     INSERT INTO core.split_report (name, rows, md5)
-    SELECT 'campaign audit_log (stays)', count(*),
-           md5(coalesce(string_agg(ROW(audit_id, at, source, action, identity_id, player_id, detail,
-                                        access_id, provider_id, method, outcome)::text, chr(10) ORDER BY audit_id), ''))
-    FROM public.audit_log WHERE action IN ('game_write', 'results_annulled');
+    SELECT 'campaign audit_log (stays)', count(*), md5(coalesce(string_agg(x::text, chr(10) ORDER BY x::text), ''))
+    FROM public.audit_log x WHERE action IN ('game_write', 'results_annulled');
 
     -- New core audit ids continue after the highest id so far.
     IF audit_max IS NOT NULL THEN

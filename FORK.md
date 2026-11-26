@@ -191,8 +191,10 @@ instance is therefore split into two parts (`sql/fork/core_split.sql`):
 - **One core per instance.** The test instance has its own core in its own
   database: test players and names can never change production names.
 - **Takeover** (`once`, idempotent): creates the core tables, copies each
-  table, compares row count and an md5 over all rows (ordered by primary key)
-  with the source, records the values in `core.split_report`, and only then
+  table, compares row count and an md5 over all rows with the source (the
+  fingerprint formula of `collect-status.sh`, so the values can be checked
+  against the fingerprint file taken before the deploy), records them in
+  `core.split_report` (`deploy.sh --report <db>` prints it), and only then
   drops the foreign keys of campaign tables to the old tables, deletes the
   moved audit rows and drops the old tables. Any difference rolls the whole
   transaction back.
