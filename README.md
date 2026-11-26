@@ -30,6 +30,10 @@ here as separate modules on top of the upstream logic.
   buy their first VTs. A test campaign can use short turns with
   `[campaign] turn_minutes` (at least 120 recommended: the game does not apply
   results to the force map in the last hour of a turn).
+- Pilots can change sides at any time without being signed out, and every
+  player has one statistic over all sides; garages stay per side and a battle
+  counts for the side it was fought for (`[campaign] transfer_in_place`,
+  `rank_per_player`, FORK.md "Changing sides at any time").
 - Players, identities and display names (the core) live in their own schema
   `core`, the campaign in `public`. A season reset empties the campaign and
   keeps every player and name (FORK.md, "Core and campaign").

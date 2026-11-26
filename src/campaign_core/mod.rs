@@ -8,6 +8,7 @@
 
 #![allow(dead_code)] // Called by the Steelbound gateway, which is the next step.
 
+pub mod faction_swap;
 pub mod gateway;
 pub mod identity;
 pub mod profile;
@@ -23,6 +24,8 @@ mod gateway_tests;
 mod shop_tests;
 #[cfg(test)]
 mod reset_tests;
+#[cfg(test)]
+mod faction_swap_tests;
 
 use crate::{
     client::{Client, ClientError, Faction, Language},

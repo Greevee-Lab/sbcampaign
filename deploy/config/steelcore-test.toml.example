@@ -15,6 +15,16 @@ turn_days = 7
 # results to the force map in the last hour of a turn. Never set for a season.
 turn_minutes = 180
 
+# Changing sides at any time (FORK.md "Changing sides at any time"). Both
+# default to true; false restores the upstream behaviour.
+# transfer_in_place: answer SetUserFaction with status 0, the game stays in
+#   the campaign and reloads the garage of the new side by itself
+#   (upstream: status 1, the game signs the player out).
+# rank_per_player: one statistic per player over all sides in the faction
+#   rankings (upstream: only the points scored for that faction).
+transfer_in_place = true
+rank_per_player = true
+
 round_end_points = 100000
 
 turn_points = [4000, 4000, 4000, 4000, 4000, 4000, 4000, 4000, 4000, 4000]

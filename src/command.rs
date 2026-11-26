@@ -720,7 +720,9 @@ pub async fn set_user_faction(client: &mut Client, faction: Faction) -> CommandR
     client.faction = faction;
 
     // Return status is always 1 to kick the user out of Campaign so that their garage reloads correctly
-    Ok(TxCommand::SetUserFaction { status: 1 })
+    // Fork: status 0 (stay in the campaign) unless [campaign] transfer_in_place = false (campaign_core::faction_swap)
+    let status = crate::campaign_core::faction_swap::transfer_status(get_config().faction_swap.transfer_in_place);
+    Ok(TxCommand::SetUserFaction { status })
 }
 
 #[derive(sqlx::FromRow)]
@@ -1010,10 +1012,8 @@ pub async fn rank_values(
         query_builder.push_bind(turn as i16);
     }
 
-    if !matches!(faction, Faction::None) {
-        query_builder.push(" AND faction = ");
-        query_builder.push_bind(faction);
-    }
+    // Fork: one statistic per player over all sides (campaign_core::faction_swap)
+    crate::campaign_core::faction_swap::push_faction_filter(&mut query_builder, faction, get_config().faction_swap.rank_per_player);
 
     query_builder
         .push(" GROUP BY xuid) as lb INNER JOIN accounts ON lb.xuid = accounts.xuid WHERE ");
@@ -1081,10 +1081,7 @@ async fn rank_count_internal(
             query_builder.push_bind(turn as i16);
         }
 
-        if !matches!(faction, Faction::None) {
-            query_builder.push(" AND faction = ");
-            query_builder.push_bind(faction);
-        }
+        crate::campaign_core::faction_swap::push_faction_filter(&mut query_builder, faction, get_config().faction_swap.rank_per_player);
 
         query_builder.push(" GROUP BY xuid) as lb WHERE ");
         query_builder.push(category.query_where_clause(is_turn));
@@ -1115,10 +1112,7 @@ async fn rank_count_internal(
             query_builder.push_bind(turn as i16);
         }
 
-        if !matches!(faction, Faction::None) {
-            query_builder.push(" AND faction = ");
-            query_builder.push_bind(faction);
-        }
+        crate::campaign_core::faction_swap::push_faction_filter(&mut query_builder, faction, get_config().faction_swap.rank_per_player);
 
         query_builder.push(" GROUP BY xuid) as lb WHERE ");
         query_builder.push(category.query_where_clause(is_turn));
