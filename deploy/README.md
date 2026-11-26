@@ -15,12 +15,14 @@ script takes the ssh target from the environment.
 |---|---|---|
 | `/opt/steelcore/releases/<commit12>/` | one release: `sbcampaign`, `sql/`, `deploy/`, `tools/`, `COMMIT` | deploy user |
 | `/opt/steelcore/releases/current` | symlink to the active release | deploy user |
+| `/opt/steelcore/releases/test` | symlink to the release of the test instance (same as `current`, or newer after `deploy.sh --test`) | deploy user |
 | `/opt/steelcore/units/` | unit files, installed by the admin tool | deploy user |
 | `/etc/steelcore/steelcore.toml` | production config (database `steelcore`, port 23457) | deploy user, service |
 | `/etc/steelcore/steelcore-test.toml` | test config (database `steelcore_test`, port 23458) | deploy user, service |
 | `/etc/steelcore/core-api/` | Core API TLS: `ca.crt`, `server.crt`, `server.key` (0640) | deploy user, service |
 | `/etc/steelcore/gateway/` | Steelbound gateway TLS: `server.crt`, `server.key` (0640) | deploy user, service |
 | `/etc/steelcore/annul/` | request file of `steelcore-annul` (normally empty) | deploy user, service |
+| `/etc/steelcore/maint/` | request files of `steelcore-maint` / `steelcore-test-maint` (normally empty, mode 2770) | deploy user, service |
 | `/etc/steelcore/backup-pubkey.asc` | OpenPGP public key for backups | deploy user |
 | `/etc/steelcore/restore/` | drop folder for a decrypted dump (normally empty) | deploy user, service |
 | `/var/lib/steelcore/backups/` | encrypted backups (`<db>-<UTC time>.dump.gpg`) | service |
@@ -37,8 +39,11 @@ database work runs inside the services below.
 | Unit | Type | What it does |
 |---|---|---|
 | `steelcore` | notify | campaign service, database `steelcore`, `127.0.0.1:23457` |
-| `steelcore-test` | notify | test campaign, database `steelcore_test` (synthetic data only), `127.0.0.1:23458` |
+| `steelcore-test` | notify | test campaign, database `steelcore_test` (synthetic data only), `127.0.0.1:23458`; runs `releases/test` |
 | `steelcore-migrate` | oneshot | `sql/fork/migrations.list` on both databases, plus a one-time seed each |
+| `steelcore-test-migrate` | oneshot | the same for the test database only, with the test release (`deploy.sh --test`) |
+| `steelcore-maint` | oneshot, by hand | season reset or core unsplit of the production database (backup first, confirmation file) |
+| `steelcore-test-maint` | oneshot, by hand | the same for the test database, with the test release; cannot touch production |
 | `steelcore-backup` + `.timer` | oneshot, daily 04:30 UTC | encrypted `pg_dump` of both databases, 14 days retention |
 | `steelcore-restore` | oneshot, by hand | restore a decrypted dump from the drop folder |
 | `steelcore-annul` | oneshot, by hand | annul the reported results of one identity (request file) |
@@ -74,6 +79,17 @@ The script finds the successful CI run of the commit, downloads the artifact
 5. prints the status check,
 6. keeps the newest five releases.
 
+### Test first
+
+`deploy/deploy.sh --test <commit>` deploys a release to the **test instance
+only**: it points `releases/test` (not `current`) at the release, installs only
+the `steelcore-test*` units, migrates only `steelcore_test`
+(`steelcore-test-migrate`) and restarts only `steelcore-test`. Production keeps
+its release, units, database and process. A failed test migration switches
+`releases/test` back. A normal deploy of the same commit afterwards points both
+links at it. The first test deploy needs a release that contains this feature;
+before it, `steelcore-test` ran the release of `current`.
+
 Other commands:
 
 ```sh
@@ -84,7 +100,8 @@ deploy/deploy.sh --rollback <commit12>    # back to an older release
 
 A rollback only switches the symlink, reinstalls that release's units and
 restarts the services. It never touches the database, so roll back only to
-releases whose code understands the current schema.
+releases whose code understands the current schema. Releases from before the
+core split do not: see "Core split", way back.
 
 ### First setup
 
@@ -152,6 +169,14 @@ Run a backup now: `sudo steelnet-admin svc start steelcore-backup`.
 
 ## Restore
 
+Since the core split a restore replaces **only the campaign** (schema
+`public`) and keeps the core (players, identities, display names) as it is,
+e.g. yesterday's campaign with today's players and names. Only if
+`/etc/steelcore/restore/RESTORE_CORE` exists, the whole dump is restored
+(schemas `public` and `core`): disaster recovery, or the way back to the
+state before the split. A dump from before the split (players still in
+`public`) is refused without `RESTORE_CORE`.
+
 1. Fetch and decrypt a backup on the operator machine:
    ```sh
    ssh "$STEELCORE_SSH" cat /var/lib/steelcore/backups/<db>-<time>.dump.gpg > b.dump.gpg
@@ -162,10 +187,12 @@ Run a backup now: `sudo steelnet-admin svc start steelcore-backup`.
    `sudo steelnet-admin svc stop steelcore-test`
 3. Upload the plain dump as `<db>.dump` into the drop folder:
    `ssh "$STEELCORE_SSH" 'umask 027; cat > /etc/steelcore/restore/steelcore_test.dump' < steelcore_test.dump`
-   For the production database also create `/etc/steelcore/restore/CONFIRM_PRODUCTION`.
-4. `sudo steelnet-admin svc start steelcore-restore` - empties the database
-   (drops and recreates schema `public`), runs `pg_restore`, and deletes the
-   plain dump and the confirmation in every case.
+   For the production database also create `/etc/steelcore/restore/CONFIRM_PRODUCTION`;
+   to replace the core too, also `/etc/steelcore/restore/RESTORE_CORE`.
+4. `sudo steelnet-admin svc start steelcore-restore` - drops and recreates
+   schema `public` (with `RESTORE_CORE` also drops schema `core`), runs
+   `pg_restore` (without `RESTORE_CORE` only `--schema=public`), and deletes
+   the plain dump and the confirmation files in every case.
 5. Start the service again, delete the local plain dump.
 6. Compare: `sudo steelnet-admin svc start steelcore-status`, then
    `/var/lib/steelcore/status/fingerprint-<db>.txt` (row count and md5 per
@@ -226,7 +253,7 @@ python3 tools/core_api_client.py --port 47102 --ca ca.crt --cert steelnet-test.c
     steelcore.v1.PlayerService/CheckDisplayName '{"name": "Test Pilot"}'
 ```
 
-Audit: `SELECT at, access_id, method, outcome FROM audit_log WHERE access_id IS NOT NULL ORDER BY at DESC LIMIT 20;`
+Audit: `SELECT at, access_id, method, outcome FROM core.audit_log WHERE access_id IS NOT NULL ORDER BY at DESC LIMIT 20;`
 
 ## Steelbound gateway
 
@@ -309,6 +336,80 @@ WHERE source = 'gateway-steelbound' ORDER BY at DESC LIMIT 20;
 
 Log lines of the gateway carry a session number and the account id, never
 addresses, tickets or game data.
+
+## Season reset
+
+A new season empties the campaign of one instance and keeps the core:
+players, identities, display names, the 30-day reservations and the 7-day
+change limits (`campaign_reset()`, `sql/fork/season_reset.sql`). No dump, no
+restore.
+
+```sh
+deploy/deploy.sh --reset steelcore_test                              # dry run: what would be emptied, what stays
+deploy/deploy.sh --reset steelcore_test apply                        # stop, backup, reset, start
+deploy/deploy.sh --reset steelcore apply start=2026-12-09T18:45Z --confirm-production
+```
+
+With `apply` the script stops the instance, writes the request to
+`/etc/steelcore/maint/<db>.request` (plus `CONFIRM_PRODUCTION` for
+production), starts `steelcore-maint` or `steelcore-test-maint`, prints its
+log and starts the instance again. `deploy/server/maint.sh`
+
+1. refuses unless the instance is stopped (and, for production, without the
+   confirmation file),
+2. writes an encrypted backup of the database first (`backup.sh`); if that
+   fails, nothing changes,
+3. runs `campaign_reset(true, <start>)` in one transaction: every table in
+   `public` except `fork_migrations` is emptied, the shop is refilled
+   (stock = limit, serials from 1), `settings` gets round 1 / turn 1 ending
+   at `start` (default: one week from now), one `campaign_reset` audit row
+   starts the new season's game audit; the core is fingerprinted before and
+   after (row count and md5 per table) and any difference rolls back,
+4. prints the emptied tables with their row counts, the new period and the
+   core counts.
+
+The function refuses on a database that is not split. A campaign ban
+(`accounts.banned`) goes with the reset; use an identity suspension for bans
+that outlast a season. Undo: restore the backup of step 2 (campaign only).
+
+## Core split
+
+`sql/fork/core_split.sql` (a `once` migration) moves the core tables into
+schema `core` (FORK.md, "Core and campaign"). It runs with the normal
+migrations, in one transaction, and only drops the old tables after every
+copied table matched its source in row count and md5. The checked values
+stay in `core.split_report`:
+
+```sh
+deploy/deploy.sh --report steelcore      # read only: "split <table> <rows> <md5> <time>", row counts, period
+```
+
+The md5 uses the formula of the status fingerprint, so each `split <table>`
+line must equal the line `<table>|<rows>|<md5>` of
+`/var/lib/steelcore/status/fingerprint-<db>.txt` taken before the deploy, and
+after the next status run the line `core.<table>|…` as well. The old
+`audit_log` count equals `split audit_log` plus `split campaign audit_log
+(stays)`.
+
+After the split the status check shows `core: <n> players, <m> display names`
+per database, and the fingerprint files list core tables as `core.<table>`.
+Core API audit rows are in `core.audit_log`, game audit rows stay in
+`audit_log` (schema `public`).
+
+**Way back**, two options:
+
+- *Keep the data* (display names set since the split stay):
+  `deploy/deploy.sh --unsplit <db>` (dry run), then
+  `deploy/deploy.sh --unsplit <db> apply [--confirm-production]`: stops the
+  instance, backup, `sql/fork/core_unsplit.sql` (copies back, compares,
+  drops schema `core`, forgets the split in `fork_migrations`), leaves the
+  instance stopped. Then `deploy/deploy.sh --rollback <release before the
+  split>` (starts it again). Every core player gets an empty campaign account
+  (the old schema needs one); core audit rows get new ids.
+- *Back to the backup* taken right before the deploy: stop the instance,
+  restore that dump with `RESTORE_CORE` (and `CONFIRM_PRODUCTION`), then
+  `deploy/deploy.sh --rollback <release before the split>`. Everything since
+  the backup is lost.
 
 ## Annul results
 

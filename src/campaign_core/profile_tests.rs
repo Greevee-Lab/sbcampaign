@@ -5,7 +5,7 @@
 
 use super::{
     SbCampaignCore,
-    tests::{synthetic_account, test_pool},
+    tests::{core_pool, synthetic_account, test_pool},
 };
 use crate::core_api::{
     Provider,
@@ -58,11 +58,13 @@ fn caller(name: &str, provider: Option<Provider>, scopes: &[Scope]) -> Caller {
 }
 
 async fn env(test: u64) -> Option<Env> {
-    let pool = test_pool().await?;
+    let campaign = test_pool().await?;
+    // Every table these tests read is a core table.
+    let pool = core_pool(&campaign).await;
     let clock = Arc::new(AtomicI64::new(chrono::Utc::now().timestamp()));
     let c2 = clock.clone();
     let api = CoreApi::new(
-        Arc::new(SbCampaignCore::new(pool.clone())),
+        Arc::new(SbCampaignCore::new(campaign, pool.clone())),
         NamePolicy::default(),
         Arc::new(move || c2.load(Ordering::SeqCst)),
     );

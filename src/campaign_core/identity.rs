@@ -5,6 +5,12 @@
 //! XUID as UUID (`Uuid::from_u64_pair(0, xuid)`, as in the upstream handshake).
 //! A Steelbound account gets the same derivation applied to its pseudo-XUID,
 //! so pilot, garage, awards and leaderboard work unchanged for it.
+//!
+//! Since the core split, player and identity live in the core schema (core
+//! pool) and the account row, the player's campaign record, in the campaign
+//! schema (campaign pool). [`resolve_identity`] only touches the core;
+//! [`open_session`] creates the account row when a player first plays in this
+//! campaign, for example after a season reset.
 
 use crate::{
     client::{Client, ClientError, Faction, Language},
@@ -46,7 +52,8 @@ fn clip(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }
 
-/// See [`crate::core_api::CampaignCore::resolve_identity`].
+/// See [`crate::core_api::CampaignCore::resolve_identity`]. `pool` is the
+/// core pool.
 pub async fn resolve_identity(
     pool: &PgPool,
     provider: Provider,
@@ -87,7 +94,8 @@ pub async fn resolve_identity(
         Some((true, _, _)) => {}
     }
 
-    // First contact: account (the player's campaign record), player, identity.
+    // First contact: player and identity. The account row (campaign record)
+    // follows in open_session, when the player actually plays.
     let player_id = derive_player_id(provider, &canonical).ok_or_else(|| IdentityError::InvalidExternalId {
         provider,
         external_id: canonical.clone(),
@@ -95,10 +103,6 @@ pub async fn resolve_identity(
 
     let mut tx = pool.begin().await?;
 
-    sqlx::query("INSERT INTO accounts (xuid) VALUES ($1) ON CONFLICT (xuid) DO NOTHING")
-        .bind(player_id)
-        .execute(&mut *tx)
-        .await?;
     sqlx::query("INSERT INTO player (player_id) VALUES ($1) ON CONFLICT (player_id) DO NOTHING")
         .bind(player_id)
         .execute(&mut *tx)
@@ -149,8 +153,14 @@ pub async fn resolve_identity(
 }
 
 /// See [`crate::core_api::CampaignCore::open_session`]. Same account lookup
-/// as the upstream handshake; also refuses suspended identities.
-pub async fn open_session(pool: &PgPool, client: &mut Client, resolved: &ResolvedIdentity) -> Result<bool, ClientError> {
+/// as the upstream handshake (campaign pool `pool`); also refuses suspended
+/// identities (core pool `core`).
+pub async fn open_session(
+    pool: &PgPool,
+    core: &PgPool,
+    client: &mut Client,
+    resolved: &ResolvedIdentity,
+) -> Result<bool, ClientError> {
     #[derive(sqlx::FromRow)]
     struct Account {
         xname: Option<String>,
@@ -180,7 +190,7 @@ pub async fn open_session(pool: &PgPool, client: &mut Client, resolved: &Resolve
     // A suspended identity may not play, even with a still valid ticket.
     let suspended: bool = sqlx::query_scalar("SELECT suspended FROM identity WHERE identity_id = $1")
         .bind(resolved.identity_id)
-        .fetch_optional(pool)
+        .fetch_optional(core)
         .await?
         .unwrap_or(false);
 

@@ -95,14 +95,17 @@ jobs:
           bash deploy/server/migrate.sh migrate_ci_prod sql/fork/preseason.sql
           test "$(psql -At -d migrate_ci_prod -c 'SELECT count(*) FROM settings')" = 1
 
-      - name: Database tests (identity, core boundary, gateway) and identity backfill
+      - name: Database tests (identity, core boundary, gateway, season reset) and identity backfill
         env:
           PGHOST: 127.0.0.1
           PGUSER: sbcampaign
           PGDATABASE: loc_campaign
           SBCAMPAIGN_TEST_DATABASE_URL: postgres://sbcampaign@127.0.0.1:5432/migrate_ci
+          SBCAMPAIGN_TEST_RESET_DATABASE_URL: postgres://sbcampaign@127.0.0.1:5432/reset_ci
           SBCAMPAIGN_REQUIRE_DB_TESTS: "1"
         run: |
+          createdb reset_ci
+          bash deploy/server/migrate.sh reset_ci sql/fork/test_seed.sql
           cargo test --release --locked campaign_core 2>&1 | tee dbtest.log
           grep -q "db_steelbound_player_through_the_core ... ok" dbtest.log
           grep -q "db_core_api_display_names ... ok" dbtest.log
@@ -110,8 +113,19 @@ jobs:
           grep -q "db_gateway_pilot_session ... ok" dbtest.log
           grep -q "db_gateway_results_plausibility_annul ... ok" dbtest.log
           grep -q "db_new_pilot_can_buy_a_starting_vt ... ok" dbtest.log
+          grep -q "db_core_survives_season_reset ... ok" dbtest.log
           createdb backfill_ci
           bash tools/test_identity_backfill.sh backfill_ci
+
+      - name: Core split (takeover, season reset, restore, way back) and test-only deploy
+        env:
+          PGHOST: 127.0.0.1
+          PGUSER: sbcampaign
+          PGDATABASE: loc_campaign
+        run: |
+          createdb split_ci
+          bash tools/test_core_split.sh split_ci
+          bash tools/test_activate.sh
 
       - name: Core API (mutual TLS) against the release binary
         env:
@@ -160,8 +174,8 @@ jobs:
           c --cert "$ca/unregistered-ci.crt" --key "$ca/unregistered-ci.key" --expect unauthenticated             steelcore.v1.PlayerService/GetPlayer '{"playerId": "00000000-0000-0000-5342-4c0100001092"}'
           c --cert "$other/steelnet-ci.crt" --key "$other/steelnet-ci.key" --expect tls             steelcore.v1.PlayerService/GetPlayer '{"playerId": "00000000-0000-0000-5342-4c0100001092"}'
           c --expect tls steelcore.v1.PlayerService/GetPlayer '{"playerId": "00000000-0000-0000-5342-4c0100001092"}'
-          test "$(psql -At -d migrate_ci -c "SELECT count(*) FROM audit_log WHERE access_id = 'steelnet-ci'")" = 2
-          test "$(psql -At -d migrate_ci -c "SELECT count(*) FROM audit_log WHERE access_id = 'stats-ci' AND outcome = 'permission_denied'")" = 1
+          test "$(psql -At -d migrate_ci -c "SELECT count(*) FROM core.audit_log WHERE access_id = 'steelnet-ci'")" = 2
+          test "$(psql -At -d migrate_ci -c "SELECT count(*) FROM core.audit_log WHERE access_id = 'stats-ci' AND outcome = 'permission_denied'")" = 1
           kill "$SERVER_PID"
           cat core.log
 
@@ -199,8 +213,8 @@ jobs:
           set +e; python3 tools/gateway_client.py --port 47100 --pin "$(printf '0%.0s' $(seq 64))" --case missing; rc=$?; set -e
           test "$rc" = 2
           q() { psql -At -d migrate_ci -c "$1"; }
-          test "$(q "SELECT count(*) FROM audit_log a JOIN identity i USING (identity_id) WHERE i.external_id = '7001' AND a.action = 'game_write' AND a.outcome = 'ok'")" = 3
-          test "$(q "SELECT xname FROM accounts a JOIN identity i ON i.player_id = a.xuid WHERE i.external_id = '7001'")" = "Test Pilot"
+          test "$(q "SELECT count(*) FROM audit_log a JOIN core.identity i USING (identity_id) WHERE i.external_id = '7001' AND a.action = 'game_write' AND a.outcome = 'ok'")" = 3
+          test "$(q "SELECT xname FROM accounts a JOIN core.identity i ON i.player_id = a.xuid WHERE i.external_id = '7001'")" = "Test Pilot"
           # No account for the fake qwUserID the client reported.
           test "$(q "SELECT count(*) FROM accounts WHERE xuid = lpad(to_hex(x'0009FFFF0000BEEF'::bigint), 32, '0')::uuid")" = 0
           # Annul tool (dry run, then apply with suspend): afterwards the gateway refuses the session.

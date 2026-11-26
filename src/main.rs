@@ -217,10 +217,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Launch the listener task to accept new clients
     let client_listener_handle = tokio::spawn(client::listener(listener, cancel_token.clone()));
 
+    // Fork: the core (players, identities, display names) in its own schema.
+    let core_pool = campaign_core::connect_core(get_pool()).await?;
+
     // Fork: network Core API (steelcore.v1), only if [core_api] is configured.
     let core_api_handle = core_api::net::server::start(
         &root_config,
-        std::sync::Arc::new(campaign_core::SbCampaignCore::new(get_pool().clone())),
+        std::sync::Arc::new(campaign_core::SbCampaignCore::new(get_pool().clone(), core_pool.clone())),
         cancel_token.clone(),
     )
     .await?;
@@ -228,7 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fork: Steelbound gateway (TLS + ticket), only if [gateway_steelbound] is configured.
     let gateway_handle = gateway_steelbound::start(
         &root_config,
-        std::sync::Arc::new(campaign_core::SbCampaignCore::new(get_pool().clone())),
+        std::sync::Arc::new(campaign_core::SbCampaignCore::new(get_pool().clone(), core_pool)),
         cancel_token.clone(),
     )
     .await?;

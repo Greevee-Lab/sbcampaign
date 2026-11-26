@@ -3,7 +3,7 @@
 //!
 //! Database tests run against the database in `SBCAMPAIGN_TEST_DATABASE_URL`
 //! (schema from `deploy/server/migrate.sh`, i.e. including
-//! `sql/fork/identity.sql`). Without it they are skipped, unless
+//! `sql/fork/identity.sql` and the core split `sql/fork/core_split.sql`). Without it they are skipped, unless
 //! `SBCAMPAIGN_REQUIRE_DB_TESTS=1` (set in CI) turns that into a failure.
 
 use super::{SbCampaignCore, identity::*};
@@ -82,6 +82,16 @@ pub(super) async fn test_pool() -> Option<PgPool> {
     }
 }
 
+/// The core pool (schema `core`) next to a campaign test pool.
+pub(super) async fn core_pool(campaign: &PgPool) -> PgPool {
+    super::connect_core(campaign).await.expect("connect the core pool")
+}
+
+/// A campaign core on the test database: campaign pool plus core pool.
+pub(super) async fn test_core(campaign: &PgPool) -> SbCampaignCore {
+    SbCampaignCore::new(campaign.clone(), core_pool(campaign).await)
+}
+
 /// The runtime of every test that runs upstream commands. Those use the
 /// server's global pool (`crate::get_pool()`); its connections belong to the
 /// runtime that opened them, so all such tests share this one runtime.
@@ -120,7 +130,8 @@ pub(super) fn synthetic_account(test: u32) -> u32 {
 
 #[tokio::test]
 async fn db_resolve_creates_then_finds_identity() {
-    let Some(pool) = test_pool().await else { return };
+    let Some(campaign) = test_pool().await else { return };
+    let pool = core_pool(&campaign).await;
     let account = synthetic_account(1);
     let ext = account.to_string();
 
@@ -134,10 +145,10 @@ async fn db_resolve_creates_then_finds_identity() {
     assert_eq!(again.identity_id, first.identity_id);
     assert_eq!(again.player_id, first.player_id);
 
-    // Player, campaign account and exactly one audit row exist.
-    let (players, accounts, audits): (i64, i64, i64) = sqlx::query_as(
+    // Player and exactly one audit row exist in the core; the campaign has no
+    // account row yet (open_session creates it when the player plays).
+    let (players, audits): (i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM player WHERE player_id = $1),
-                (SELECT count(*) FROM accounts WHERE xuid = $1),
                 (SELECT count(*) FROM audit_log WHERE identity_id = $2 AND action = 'identity_created')",
     )
     .bind(first.player_id)
@@ -145,7 +156,13 @@ async fn db_resolve_creates_then_finds_identity() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!((players, accounts, audits), (1, 1, 1));
+    assert_eq!((players, audits), (1, 1));
+    let accounts: i64 = sqlx::query_scalar("SELECT count(*) FROM accounts WHERE xuid = $1")
+        .bind(first.player_id)
+        .fetch_one(&campaign)
+        .await
+        .unwrap();
+    assert_eq!(accounts, 0);
 
     let verified_by: String = sqlx::query_scalar("SELECT verified_by FROM identity WHERE identity_id = $1")
         .bind(first.identity_id)
@@ -157,7 +174,8 @@ async fn db_resolve_creates_then_finds_identity() {
 
 #[tokio::test]
 async fn db_identity_is_unique_per_provider_and_external_id() {
-    let Some(pool) = test_pool().await else { return };
+    let Some(campaign) = test_pool().await else { return };
+    let pool = core_pool(&campaign).await;
     let account = synthetic_account(2);
     let ext = account.to_string();
 
@@ -189,7 +207,8 @@ async fn db_identity_is_unique_per_provider_and_external_id() {
 
 #[tokio::test]
 async fn db_sql_derivation_equals_rust() {
-    let Some(pool) = test_pool().await else { return };
+    let Some(campaign) = test_pool().await else { return };
+    let pool = core_pool(&campaign).await;
     // The formula of sql/account_migration.sql and sql/fork/identity.sql.
     for xuid in [1u64, 0x0009_FFFF_0000_0001, 0x5342_4C01_0000_0001, 0x5342_4C01_FFFF_FFFF, 0xE000_0000_0000_0001] {
         let sql: Uuid = sqlx::query_scalar("SELECT lpad(to_hex($1::bigint), 32, '0')::uuid")
@@ -211,7 +230,8 @@ async fn db_sql_derivation_equals_rust() {
 
 #[tokio::test]
 async fn db_disabled_and_invalid_are_refused() {
-    let Some(pool) = test_pool().await else { return };
+    let Some(campaign) = test_pool().await else { return };
+    let pool = core_pool(&campaign).await;
     // Insignia is prepared but disabled: no identity is created.
     let r = resolve_identity(&pool, Provider::Insignia, "0009ffff0000beef", VerifiedBy::FirstLogin, "test").await;
     assert!(matches!(r, Err(IdentityError::ProviderDisabled(Provider::Insignia))));
@@ -254,7 +274,7 @@ fn db_steelbound_player_through_the_core() {
 async fn steelbound_player_through_the_core() {
     let Some(pool) = global_pool().await else { return };
 
-    let core = SbCampaignCore::new(pool.clone());
+    let core = test_core(&pool).await;
     let (ours, _theirs) = tokio::io::duplex(64);
     let mut client = session(Box::new(ours));
 

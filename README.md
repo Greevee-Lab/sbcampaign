@@ -30,6 +30,9 @@ here as separate modules on top of the upstream logic.
   buy their first VTs. A test campaign can use short turns with
   `[campaign] turn_minutes` (at least 120 recommended: the game does not apply
   results to the force map in the last hour of a turn).
+- Players, identities and display names (the core) live in their own schema
+  `core`, the campaign in `public`. A season reset empties the campaign and
+  keeps every player and name (FORK.md, "Core and campaign").
 
 ## Building
 
@@ -74,7 +77,9 @@ with `sql/` as an artifact.
    ```
 
    `sql/fork/base_schema.sql` is reconstructed from the queries in the code;
-   upstream has not published its schema yet.
+   upstream has not published its schema yet. For the identity, Core API and gateway
+   features apply the full migration list instead (core in schema `core`):
+   `PGHOST=127.0.0.1 PGUSER=sbcampaign bash deploy/server/migrate.sh loc_campaign sql/fork/test_seed.sql`.
 3. Copy `loc.toml` and point it at your database. Without `host` the server
    uses the Unix socket (`socket`, default `/var/run/postgresql`). With
    `host` it connects over TCP:

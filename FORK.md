@@ -60,6 +60,8 @@ of the campaign core of [steelcore](https://github.com/Greevee-Lab/steelcore).
 | Shop catalog: the 31 VT types of the reinforcement shop (faction, cost, limit, turn of release) as a `once` migration with full stock and serials from 1; without it a new pilot cannot buy a VT and MISSION SELECT stays disabled. Upstream fills `shop` with a one-off import from its old database (`sql/shop_migration.sql`) | `sql/fork/shop_catalog.sql`, `sql/fork/migrations.list`, `src/campaign_core/shop_tests.rs` | maybe: a seed file for new installs (see below) |
 | Optional short turns: `[campaign] turn_minutes` (at least 10) replaces the fixed one-week turn and scales the shop drops; at start the running turn is shortened to at most one turn from now. Without the key nothing changes. Meant for the test campaign | `src/campaign_core/turn.rs`, `src/service.rs` (turn length), `src/main.rs` (config field), `deploy/config/steelcore-test.toml.example` | maybe (configurable turn length) |
 | Fix: buying an unlimited VT (`vtstock` NULL) set its stock to 0 (`GREATEST(NULL - n, 0)` is 0 in PostgreSQL), so the VT vanished from every shop until the next restock | `src/command.rs` (`vt_add`) | **yes** (see below) |
+| Core split: players, identities, display names, accesses, idempotency keys and the Core API audit move into schema `core` (takeover with row count and md5 check, way back, own connection pool with `search_path = core`); the campaign keeps schema `public` and refers to the core by value only | `sql/fork/core_split.sql`, `sql/fork/core_unsplit.sql`, `sql/fork/gateway_annul.sql` (schema-qualified), `src/campaign_core/mod.rs` (`connect_core`), `src/campaign_core/identity.rs`, `src/campaign_core/profile.rs`, `src/main.rs` (open the core pool), `tools/test_core_split.sh` | no |
+| Season reset that keeps the core: `campaign_reset()` empties every campaign table, refills the shop, starts round 1 / turn 1 and checks that the core did not change; maintenance units with backup first; restore keeps the core unless asked; test-first deploy (`releases/test`, `deploy.sh --test`) | `sql/fork/season_reset.sql`, `deploy/server/maint.sh`, `deploy/server/restore.sh`, `deploy/server/activate.sh`, `deploy/deploy.sh`, `deploy/units/steelcore-maint.service`, `deploy/units/steelcore-test-*.service`, `src/campaign_core/reset_tests.rs`, `tools/test_activate.sh` | no |
 
 ## Players, identities and the core boundary
 
@@ -157,6 +159,71 @@ shortcut.
   name stays reserved for its owner for 30 days (both configurable).
   A provider may only rename players it has an identity for.
 - **Operation:** `deploy/README.md`, section "Core API".
+
+## Core and campaign
+
+A season ends; players and their display names stay. The data of one
+instance is therefore split into two parts (`sql/fork/core_split.sql`):
+
+| Part | Schema | Tables | Emptied by a season reset |
+|---|---|---|---|
+| Core | `core` | `provider`, `player`, `identity`, `display_name`, `display_name_reservation`, `display_name_blocklist`, `api_access`, `api_idempotency`, `audit_log` (identity and Core API rows), `split_report` | never |
+| Campaign | `public` | `accounts`, `settings`, `shop`, `garage`, `graveyard`, `leaderboard`, `wartide`, `awards`, `gateway_result`, `audit_log` (game writes, annulments, reset) | yes (`shop` is refilled) |
+
+- **No foreign key between the parts.** The campaign refers to the core by
+  value: `accounts.xuid` = `player_id`, `gateway_result.identity_id`. Either
+  part can be emptied or restored on its own, and the core could later move
+  to a database of its own without a schema change.
+- **Two pools.** `SbCampaignCore` holds the campaign pool (the server's
+  global pool) and a core pool on the same database with `search_path = core`
+  (`campaign_core::connect_core`, at most 4 connections). Core code
+  (`identity.rs`, `profile.rs`) uses the core pool, so an unqualified table
+  name there can only be a core table, and the campaign pool cannot see core
+  tables by accident. `resolve_identity` now only touches the core; the
+  account row (the player's campaign record) is created by `open_session`
+  when the player plays, e.g. for the first time after a reset.
+- **Why a schema and not a database of its own:** the service role may not
+  create databases or roles, and both instances run as the same operating
+  system user with peer authentication, so a second role would not separate
+  anything. In one database the takeover runs in one transaction (copy,
+  compare, drop) and a backup is one consistent snapshot of both parts. A
+  season reset no longer needs a database restore.
+- **One core per instance.** The test instance has its own core in its own
+  database: test players and names can never change production names.
+- **Takeover** (`once`, idempotent): creates the core tables, copies each
+  table, compares row count and an md5 over all rows with the source (the
+  fingerprint formula of `collect-status.sh`, so the values can be checked
+  against the fingerprint file taken before the deploy), records them in
+  `core.split_report` (`deploy.sh --report <db>` prints it), and only then
+  drops the foreign keys of campaign tables to the old tables, deletes the
+  moved audit rows and drops the old tables. Any difference rolls the whole
+  transaction back.
+- **Way back:** `sql/fork/core_unsplit.sql` (not in the migration list; run
+  through `maint.sh unsplit` right before rolling back to a release from
+  before the split) puts everything back as before, compared the same way;
+  core audit rows get new ids. Or restore the backup taken before the
+  deploy with `RESTORE_CORE` (see `deploy/README.md`).
+- **Season reset:** `campaign_reset(apply, turn1_end, source)` in
+  `sql/fork/season_reset.sql` empties every table in `public` except
+  `fork_migrations`, refills the shop (stock = limit, serials from 1), starts
+  round 1 / turn 1 and writes one `campaign_reset` audit row; it fingerprints
+  every core table before and after and aborts on any difference, and it
+  refuses to run on a database that is not split. A campaign ban
+  (`accounts.banned`) goes with the reset; a ban that must outlast a season
+  is an identity suspension (core). Operation: `deploy/README.md`, "Season
+  reset".
+- **Annulment** stays one SQL function, now schema-qualified: the identity in
+  `core`, ledger, leaderboard and war tide in `public`. It works on the open
+  ledger rows it locked at the start; a suspension also writes a core audit
+  row (`identity_suspended`).
+- **Tests:** `db_core_survives_season_reset` (own database
+  `SBCAMPAIGN_TEST_RESET_DATABASE_URL`: names, 7-day limit, 30-day
+  reservation and identities unchanged after a reset, a new account on the
+  next session), `tools/test_core_split.sh` (takeover with synthetic season
+  data, second run, annulment, reset through `maint.sh` with backup, restore
+  of the campaign only, refusal of a pre-split dump, way back, split again,
+  way back through a pre-split backup), `tools/test_activate.sh` (test-first
+  deploy). All other tests run unchanged against the split schema.
 
 ## Steelbound gateway
 

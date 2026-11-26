@@ -8,7 +8,7 @@
 
 use super::{
     SbCampaignCore,
-    tests::{global_pool, globals_runtime, synthetic_account},
+    tests::{global_pool, globals_runtime, synthetic_account, test_core},
 };
 use crate::{
     core_api::{Provider, gateway::GatewayCore},
@@ -50,7 +50,7 @@ fn core_without_database() -> SbCampaignCore {
         .acquire_timeout(Duration::from_secs(2))
         .connect_lazy("postgres://nobody@127.0.0.1:9/none")
         .unwrap();
-    SbCampaignCore::new(pool)
+    SbCampaignCore::new(pool.clone(), pool)
 }
 
 fn pseudo_xuid(account: u32) -> u64 {
@@ -189,7 +189,7 @@ async fn identity_connection_rate_is_limited() {
 // ---- With the database -----------------------------------------------------
 
 async fn player_of(pool: &PgPool, account: u32) -> Option<Uuid> {
-    sqlx::query_scalar("SELECT player_id FROM identity WHERE provider_id = 'steelbound' AND external_id = $1")
+    sqlx::query_scalar("SELECT player_id FROM core.identity WHERE provider_id = 'steelbound' AND external_id = $1")
         .bind(account.to_string())
         .fetch_optional(pool)
         .await
@@ -218,7 +218,7 @@ fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
 fn db_gateway_pilot_session() {
     globals_runtime().block_on(async {
         let Some(pool) = global_pool().await else { return };
-        let gw = new_gateway(SbCampaignCore::new(pool.clone()), generous_limits());
+        let gw = new_gateway(test_core(&pool).await, generous_limits());
         let a = synthetic_account(10);
         let b = synthetic_account(11);
         let ticket_a = TicketSpec { display_name: "Gw Pilot".into(), ..TicketSpec::valid(a) }.sign();
@@ -275,7 +275,7 @@ fn db_gateway_pilot_session() {
 fn db_gateway_results_plausibility_annul() {
     globals_runtime().block_on(async {
         let Some(pool) = global_pool().await else { return };
-        let core = SbCampaignCore::new(pool.clone());
+        let core = test_core(&pool).await;
         let gw = new_gateway(core.clone(), generous_limits());
         let c = synthetic_account(12);
         let ticket = TicketSpec::valid(c).sign();
@@ -362,6 +362,15 @@ fn db_gateway_results_plausibility_annul() {
         .await
         .unwrap();
         assert_eq!(annul_rows, 1);
+        // The suspension is a core change: one row in the core audit.
+        let suspended_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM core.audit_log WHERE player_id = $1 AND action = 'identity_suspended'",
+        )
+        .bind(player)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(suspended_rows, 1);
 
         // Running it again takes nothing back twice.
         let again = core.annul_identity_results(Provider::Steelbound, &c.to_string(), false, false, "test").await;

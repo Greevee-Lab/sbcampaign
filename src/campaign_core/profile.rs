@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! PostgreSQL implementation of [`ProfileCore`] (schema `sql/fork/core_api.sql`).
+//! PostgreSQL implementation of [`ProfileCore`] (tables from `sql/fork/core_api.sql`,
+//! since `sql/fork/core_split.sql` in schema `core`, reached through the core pool).
 
 use super::{SbCampaignCore, identity};
 use crate::core_api::{
@@ -97,8 +98,9 @@ async fn player_view(
     Ok(Some(PlayerView { player_id, display_name, display_name_changed_at: changed_at, external_ids }))
 }
 
+/// Every table of this file is a core table: always the core pool.
 fn pool(core: &SbCampaignCore) -> &PgPool {
-    core.pool()
+    core.core_pool()
 }
 
 impl ProfileCore for SbCampaignCore {

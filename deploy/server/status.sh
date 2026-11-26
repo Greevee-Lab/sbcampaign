@@ -28,6 +28,10 @@ fail() { printf '  FAIL  %s\n' "$*"; failed=1; }
 info() { printf '  info  %s\n' "$*"; }
 
 info "release $(cat "$release/COMMIT" 2>/dev/null | cut -c1-12)"
+releases=$(dirname "$release")
+cur=$(readlink "$releases/current" 2>/dev/null)
+tst=$(readlink "$releases/test" 2>/dev/null)
+[ -n "$tst" ] && info "releases: current -> ${cur:-?}, test -> $tst"
 
 for unit in steelcore.service steelcore-backup.timer steelcore-status.timer; do
   state=$(systemctl is-active "$unit" 2>/dev/null)
@@ -91,7 +95,7 @@ if [ -r "$status_file" ]; then
   [ "$age" -le "$max_status_age" ] && pass "collected status is ${age}s old" || fail "collected status is ${age}s old"
   for db in steelcore steelcore_test; do
     [ "$(get "db\.$db")" = ok ] &&
-      pass "database $db reachable, $(get "db\.$db\.migrations") migrations, $(get "db\.$db\.procedures") procedures, round/turn $(get "db\.$db\.period")" ||
+      pass "database $db reachable, $(get "db\.$db\.migrations") migrations, $(get "db\.$db\.procedures") procedures, round/turn $(get "db\.$db\.period"), core: $(get "db\.$db\.core" | grep . || echo unknown)" ||
       fail "database $db not reachable"
   done
   bt=$(get 'backup\.steelcore\.time')

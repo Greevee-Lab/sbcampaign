@@ -7,8 +7,7 @@
 //! the shop or in the garage, otherwise MISSION SELECT stays disabled.
 
 use super::{
-    SbCampaignCore,
-    tests::{global_pool, globals_runtime, session, synthetic_account, synthetic_pilot},
+    tests::{global_pool, globals_runtime, session, synthetic_account, synthetic_pilot, test_core},
 };
 use crate::{
     client::Faction,
@@ -56,7 +55,7 @@ fn db_new_pilot_can_buy_a_starting_vt() {
 
 async fn new_pilot_can_buy_a_starting_vt() {
     let Some(pool) = global_pool().await else { return };
-    let core = SbCampaignCore::new(pool.clone());
+    let core = test_core(&pool).await;
 
     // The catalog is complete: 31 VT types, each with a known faction.
     let (types, unknown): (i64, i64) =
