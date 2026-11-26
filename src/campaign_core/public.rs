@@ -56,6 +56,16 @@ pub const MAX_BYTES: usize = 256 * 1024;
 /// Upper bounds for the configurable list lengths.
 const MAX_LEADERBOARD: usize = 100;
 const MAX_BATTLES: usize = 100;
+/// W529: upper bound of `[public] matches` (grouped battles, `matches[]`).
+const MAX_MATCHES: usize = 50;
+/// W529: pilot results read for the grouping (newest first). A match has up to
+/// 12 pilots; 1 200 rows hold 50 full matches twice over.
+pub const MATCH_ROWS: usize = 1200;
+/// W529: the reports of one match arrive within this many seconds of its first
+/// report (see `group_matches`).
+pub const MATCH_WINDOW_SECS: i64 = 120;
+/// W529: `matches[]` gives way (oldest first) when the document would grow past this.
+pub const MATCH_FIT_BYTES: usize = MAX_BYTES * 95 / 100;
 /// Upper bound of `[public] ranking_pilots` (the full ranking list, `pilots`).
 const MAX_PILOTS: usize = 250;
 /// Longest display name that is shown (the name rules allow 15 characters).
@@ -91,6 +101,8 @@ pub struct PublicConfig {
     /// Most pilots in the full ranking list (`pilots`); default 200.
     pub ranking_pilots: usize,
     pub battles: usize,
+    /// W529: newest grouped battles (`matches[]`); default 30.
+    pub matches: usize,
     /// Value the game uses for the first map of a turn (0 or 1). The game
     /// sends 1..=3 (live data 26.11.2026: maps 1, 2 and 3 in turn 1), so the
     /// default is 1.
@@ -187,6 +199,7 @@ impl PublicConfig {
             leaderboard_size: count(p, "leaderboard_size", 25, MAX_LEADERBOARD)?,
             ranking_pilots: count(p, "ranking_pilots", 200, MAX_PILOTS)?,
             battles: count(p, "battles", 30, MAX_BATTLES)?,
+            matches: count(p, "matches", 30, MAX_MATCHES)?,
             map_base,
             sector_names,
             side_names,
@@ -277,6 +290,10 @@ pub struct Snapshot {
     pub turn_battles: Vec<(i16, i64)>,
     /// W527: end of every turn of the round (`settings.period`).
     pub turn_ends: Vec<(i16, DateTime<Utc>)>,
+    /// W529: the newest `MATCH_ROWS` pilot results (newest first) for `matches[]`.
+    pub match_rows: Vec<Battle>,
+    /// W529: false when the query hit `MATCH_ROWS` (older results exist).
+    pub match_rows_complete: bool,
 }
 
 /// Players that never appear: banned accounts and players with a suspended identity.
@@ -458,6 +475,23 @@ pub async fn collect(pool: &PgPool, battles: usize, round: Option<i16>) -> Resul
             .bind(round)
             .fetch_all(&mut *tx)
             .await?;
+    // W529: the same results as `battles`, more of them, for grouping into matches.
+    let rows: Vec<(DateTime<Utc>, i16, i16, String, Uuid, Option<String>, Vec<i64>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT g.at, g.turn, g.\"map\", g.faction::text, g.player_id, d.name, g.points
+         FROM public.gateway_result g
+         LEFT JOIN core.display_name d ON d.player_id = g.player_id
+         WHERE g.kind = 'user_points' AND {open}
+         ORDER BY g.at DESC, g.result_id DESC LIMIT $2"
+    )))
+    .bind(round)
+    .bind(MATCH_ROWS as i64)
+    .fetch_all(&mut *tx)
+    .await?;
+    let match_rows_complete = rows.len() < MATCH_ROWS;
+    let match_rows = rows
+        .into_iter()
+        .map(|(at, turn, map, faction, player, name, points)| Battle { at, turn, map, faction, player, name, points })
+        .collect();
     tx.rollback().await?;
     Ok(Snapshot {
         now,
@@ -472,6 +506,8 @@ pub async fn collect(pool: &PgPool, battles: usize, round: Option<i16>) -> Resul
         sector_counts,
         turn_battles,
         turn_ends,
+        match_rows,
+        match_rows_complete,
     })
 }
 
@@ -720,6 +756,99 @@ pub fn md_plain(s: &str) -> String {
 }
 
 /// Build the public document. Pure: everything comes from the snapshot.
+// ---- W529: battles grouped into matches -----------------------------------
+
+/// Result of one pilot report: `win`, `loss`, or `None` without the ten stats
+/// (stat7 = missions played, stat6 = missions won).
+pub fn pilot_result(points: &[i64]) -> Option<&'static str> {
+    let st = |i: usize| points.get(i).copied().unwrap_or(0);
+    (points.len() == 10 && st(6) > 0).then(|| if st(5) > 0 { "win" } else { "loss" })
+}
+
+/// Result of one side in a match: every reporting pilot agrees (`win`/`loss`),
+/// `mixed` when they do not, `None` when nobody reported a result.
+pub fn side_result(results: &[Option<&'static str>]) -> Option<&'static str> {
+    let mut seen = results.iter().flatten();
+    let first = *seen.next()?;
+    Some(if seen.all(|r| *r == first) { first } else { "mixed" })
+}
+
+/// Winner of a match from the side results (game order, `SIDES` index):
+/// `(winner, note)`.
+/// - The one side whose pilots reported `win` wins (the others lost or sent no result).
+/// - Two sides with `win`, or a side whose pilots disagree: `(None, "conflict")`.
+/// - Every reporting side lost (at least two): `draw`.
+/// - Only one side in the match: shown anyway with `"one_side"` (a win stays a win).
+/// - No result at all: `(None, None)`.
+pub fn match_winner(sides: &[(usize, Option<&'static str>)]) -> (Option<&'static str>, Option<&'static str>) {
+    let one = (sides.len() == 1).then_some("one_side");
+    if sides.iter().any(|s| s.1 == Some("mixed")) {
+        return (None, Some("conflict"));
+    }
+    let wins: Vec<usize> = sides.iter().filter(|s| s.1 == Some("win")).map(|s| s.0).collect();
+    let losses = sides.iter().filter(|s| s.1 == Some("loss")).count();
+    match wins.len() {
+        1 => (Some(SIDES[wins[0]]), one),
+        0 if losses >= 2 && losses == sides.len() => (Some("draw"), None),
+        0 => (None, one),
+        _ => (None, Some("conflict")),
+    }
+}
+
+/// Group pilot results (`rows` newest first, as the query returns them) into
+/// matches; returns the row indices of every match, the newest match first.
+///
+/// There is no match id. The pilots of one match report at its end, each
+/// console on its own, so the reports of one match share round, turn and
+/// sector (map) and arrive close together: a report joins the open match of
+/// its sector when it came at most `window` after that match's first report.
+/// A pilot is in a match at most once: a second report of the same pilot
+/// starts a new match (two short matches back to back in one sector).
+/// `complete = false` (the query hit its row limit): matches that began within
+/// `window` of the oldest row may miss reports and are left out.
+pub fn group_matches(rows: &[Battle], window: chrono::Duration, complete: bool) -> Vec<Vec<usize>> {
+    // (first report, last report, members)
+    let mut groups: Vec<(DateTime<Utc>, DateTime<Utc>, Vec<usize>)> = Vec::new();
+    let mut open: HashMap<(i16, i16), usize> = HashMap::new();
+    for i in (0..rows.len()).rev() {
+        let r = &rows[i];
+        let key = (r.turn, r.map);
+        let join = open.get(&key).copied().filter(|&g| {
+            r.at - groups[g].0 <= window && !groups[g].2.iter().any(|&j| rows[j].player == r.player)
+        });
+        match join {
+            Some(g) => {
+                groups[g].1 = groups[g].1.max(r.at);
+                groups[g].2.push(i);
+            }
+            None => {
+                groups.push((r.at, r.at, vec![i]));
+                open.insert(key, groups.len() - 1);
+            }
+        }
+    }
+    if !complete {
+        if let Some(oldest) = rows.last() {
+            groups.retain(|g| g.0 - oldest.at > window);
+        }
+    }
+    groups.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
+    groups.into_iter().map(|g| g.2).collect()
+}
+
+/// Shorten `matches[]` (oldest first) until the rendered document fits `limit`
+/// bytes; the other lists stay as they are.
+pub fn fit_matches(doc: &mut Value, limit: usize) {
+    // Rendered size: compact JSON plus the final newline (`render`).
+    let mut size = serde_json::to_vec(doc).map(|v| v.len() + 1).unwrap_or(0);
+    let Some(m) = doc.get_mut("matches").and_then(Value::as_array_mut) else { return };
+    while size > limit {
+        let Some(last) = m.pop() else { return };
+        // The entry and the comma before it (none for the only entry).
+        size -= serde_json::to_vec(&last).map(|v| v.len()).unwrap_or(0) + usize::from(!m.is_empty());
+    }
+}
+
 pub fn build(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) -> Value {
     build_all(cfg, snap, names).0
 }
@@ -732,6 +861,7 @@ pub fn build_all(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) 
     everyone.extend(snap.battles.iter().map(|b| b.player));
     everyone.extend(snap.turn_rows.iter().map(|r| r.player));
     everyone.extend(snap.pilot_battles.iter().map(|b| b.player));
+    everyone.extend(snap.match_rows.iter().map(|b| b.player));
     names.assign(&everyone);
     let minute = |t: DateTime<Utc>| ts(t - chrono::Duration::seconds(t.timestamp().rem_euclid(60)));
     // Everyone has a number now: read-only from here on.
@@ -952,6 +1082,84 @@ pub fn build_all(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) 
         })
         .collect();
 
+    // W529: the same results grouped into matches: one entry per battle with
+    // its sides, pilots and the winning side.
+    let groups = group_matches(&snap.match_rows, chrono::Duration::seconds(MATCH_WINDOW_SECS), snap.match_rows_complete);
+    let matches: Vec<Value> = groups
+        .iter()
+        .take(cfg.matches)
+        .map(|g| {
+            let rows: Vec<&Battle> = g.iter().map(|&i| &snap.match_rows[i]).collect();
+            let first = rows[0];
+            let end = rows.iter().map(|b| b.at).max().unwrap_or(first.at);
+            // Per side (game order): (pilots, points, kills, results).
+            let mut per: Vec<(usize, Vec<Value>, i64, i64, Vec<Option<&'static str>>)> = Vec::new();
+            let mut sorted = rows.clone();
+            sorted.sort_by(|a, b| {
+                let st = |x: &Battle, i: usize| x.points.get(i).copied().unwrap_or(0);
+                st(b, 3).cmp(&st(a, 3)).then(st(b, 2).cmp(&st(a, 2))).then(
+                    shown(&a.player, a.name.as_deref()).cmp(&shown(&b.player, b.name.as_deref())),
+                )
+            });
+            for b in sorted {
+                let Some(side) = side_index(&b.faction) else { continue };
+                let st = |i: usize| b.points.get(i).copied().unwrap_or(0);
+                let res = pilot_result(&b.points);
+                let mut p = json!({
+                    "pilot": shown(&b.player, b.name.as_deref()),
+                    "result": res,
+                    "points": st(3),
+                    "kills": st(2),
+                });
+                if let Some(sl) = slugs.get(&b.player) {
+                    p["slug"] = json!(sl);
+                }
+                let k = match per.iter().position(|e| e.0 == side) {
+                    Some(k) => k,
+                    None => {
+                        per.push((side, Vec::new(), 0, 0, Vec::new()));
+                        per.len() - 1
+                    }
+                };
+                let e = &mut per[k];
+                e.1.push(p);
+                e.2 += st(3);
+                e.3 += st(2);
+                e.4.push(res);
+            }
+            per.sort_by_key(|e| e.0);
+            let side_results: Vec<(usize, Option<&'static str>)> =
+                per.iter().map(|e| (e.0, side_result(&e.4))).collect();
+            let (winner, note) = match_winner(&side_results);
+            let mut sides: Vec<(usize, Value)> = per
+                .into_iter()
+                .map(|(side, pilots, points, kills, res)| {
+                    let v = json!({
+                        "side": SIDES[side],
+                        "result": side_result(&res),
+                        "points": points,
+                        "kills": kills,
+                        "pilots": pilots,
+                    });
+                    (side, v)
+                })
+                .collect();
+            // The winning side first, then the game order.
+            if let Some(w) = winner.filter(|w| *w != "draw") {
+                sides.sort_by_key(|(s, _)| (SIDES[*s] != w, *s));
+            }
+            let sides: Vec<Value> = sides.into_iter().map(|(_, v)| v).collect();
+            json!({
+                "at": minute(end),
+                "turn": first.turn,
+                "sector": sector_of(first.turn, first.map, cfg.map_base),
+                "winner": winner,
+                "note": note,
+                "sides": sides,
+            })
+        })
+        .collect();
+
     // W527: one entry per turn so far (war chart, turn reports).
     let ends: HashMap<i16, DateTime<Utc>> = snap.turn_ends.iter().copied().collect();
     let tb: HashMap<i16, i64> = snap.turn_battles.iter().copied().collect();
@@ -1138,6 +1346,7 @@ pub fn build_all(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) 
         "leaderboards": boards,
         "pilots": pilots,
         "battles": battles,
+        "matches": matches,
         "totals": {
             "ranked_pilots": rows.len(),
             "ranked_pilots_turn": ranked_turn,
@@ -1146,6 +1355,8 @@ pub fn build_all(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) 
         "turns": turns,
         "awards": {"categories": AWARD_CATEGORIES, "per_turn": AWARD_PLACES, "turns": closed},
     });
+    let mut doc = doc;
+    fit_matches(&mut doc, MATCH_FIT_BYTES);
     (doc, pilot_docs)
 }
 
@@ -1318,12 +1529,13 @@ pub async fn run(pool: &PgPool, root: &toml::Table) -> Result<(), Box<dyn std::e
     write_atomic(&path, &bytes)?;
     let (_, removed) = sync_pilot_files(&dir, &pilot_files)?;
     eprintln!(
-        "public export: {} round {} turn {}, {} pilots, {} battles, {} bytes; pilot files {} ({} written, {} removed)",
+        "public export: {} round {} turn {}, {} pilots, {} battles, {} matches, {} bytes; pilot files {} ({} written, {} removed)",
         cfg.campaign,
         snap.period.round,
         snap.period.turn,
         snap.standings.len(),
         snap.battles.len(),
+        doc["matches"].as_array().map_or(0, Vec::len),
         bytes.len(),
         pilot_files.len(),
         written,

@@ -46,6 +46,8 @@ const KEYS: &[&str] = &[
     "hits", "shots", "base_captures", "capture_count", "tippings", "pilots", "ranked_pilots_turn",
     // W527: profile slugs, awards, turn reports.
     "slug", "awards", "turns", "ends_at", "closest", "gap", "margin", "discord_md", "categories", "per_turn",
+    // W529: battles grouped into matches.
+    "matches", "winner", "note",
 ];
 
 /// Keys of a pilot file (W527).
@@ -128,6 +130,8 @@ fn snapshot() -> Snapshot {
         sector_counts: Vec::new(),
         turn_battles: Vec::new(),
         turn_ends: Vec::new(),
+        match_rows: Vec::new(),
+        match_rows_complete: true,
     }
 }
 
@@ -455,11 +459,12 @@ fn public_document_size_is_bounded() {
         leaderboard_size = 100
         ranking_pilots = 250
         battles = 100
+        matches = 50
     "#
     .parse()
     .unwrap();
     let max = PublicConfig::from_toml(&root).unwrap();
-    assert_eq!((max.leaderboard_size, max.ranking_pilots, max.battles), (100, 250, 100));
+    assert_eq!((max.leaderboard_size, max.ranking_pilots, max.battles, max.matches), (100, 250, 100, 50));
     snap.standings = (0..1000u128)
         .map(|n| Standing {
             player: uid(n),
@@ -510,7 +515,22 @@ fn public_document_size_is_bounded() {
     snap.sector_counts = (0..1000u128).map(|n| (uid(n), 8, 2, 99_999)).collect();
     snap.turn_battles = (1..=8).map(|t| (t, 9_999_999)).collect();
     snap.turn_ends = (1..=8).map(|t| (t, at)).collect();
+    // W529: 50 matches of 12 listed pilots each (6 against 6), every value at 7 digits.
+    snap.match_rows = (0..600u128)
+        .map(|n| Battle {
+            at: at - chrono::Duration::seconds((n / 12) as i64 * 600),
+            turn: 8,
+            map: 2,
+            faction: if n % 2 == 0 { "prf" } else { "hsd" }.into(),
+            player: uid(n % 250),
+            name: Some(format!("Pilot{:011}", n % 250)),
+            points: vec![9_999_999; 10],
+        })
+        .collect();
     let (doc, files) = build_all(&max, &snap, &mut Placeholders::new(&[1u8; 32], ""));
+    let kept = doc["matches"].as_array().unwrap().len();
+    assert!(kept >= 8, "the largest configuration still shows {kept} matches");
+    eprintln!("worst case: {kept} of 50 matches kept");
     assert_eq!(doc["pilots"].as_array().unwrap().len(), 250);
     assert_eq!(doc["turns"].as_array().unwrap().len(), 8);
     let bytes = render(&doc).expect("the largest configuration fits the size limit");
@@ -521,6 +541,7 @@ fn public_document_size_is_bounded() {
     // The default list lengths (25 / 200 / 30) keep more than 20 % room.
     let root: toml::Table = "[ticket]\ncampaign = \"steelbound-s1\"".parse().unwrap();
     let (dflt, _) = build_all(&PublicConfig::from_toml(&root).unwrap(), &snap, &mut Placeholders::new(&[1u8; 32], ""));
+    assert_eq!(dflt["matches"].as_array().unwrap().len(), 30, "the default list lengths keep every match");
     let n = render(&dflt).unwrap().len();
     assert!(n < MAX_BYTES * 80 / 100, "{n} bytes");
     eprintln!("worst case with the default list lengths: {n} bytes");
@@ -530,6 +551,231 @@ fn public_document_size_is_bounded() {
     eprintln!("worst case: largest pilot file {largest} bytes, {} files", rendered.len());
     let huge = Value::String("x".repeat(MAX_BYTES));
     assert!(render(&huge).is_err());
+}
+
+// ---- W529: matches -----------------------------------------------------------
+
+/// One pilot report `secs` after a fixed time (turn 3), with kill points and kills.
+#[allow(clippy::too_many_arguments)]
+fn mrow(n: u128, name: Option<&str>, secs: i64, map: i16, f: &str, win: Option<bool>, kp: i64, kills: i64) -> Battle {
+    let base = Utc.with_ymd_and_hms(2026, 11, 26, 20, 0, 0).unwrap();
+    Battle {
+        at: base + chrono::Duration::seconds(secs),
+        turn: 3,
+        map,
+        faction: f.to_owned(),
+        player: uid(n),
+        name: name.map(str::to_owned),
+        points: match win {
+            Some(w) => vec![5, 9, kills, kp, 1, w as i64, 1, 0, 0, 0],
+            None => vec![kp],
+        },
+    }
+}
+
+/// Newest first, like the query (`ORDER BY at DESC, result_id DESC`; the list
+/// order stands in for the result id).
+fn newest_first(rows: Vec<Battle>) -> Vec<Battle> {
+    let mut idx: Vec<usize> = (0..rows.len()).collect();
+    idx.sort_by(|&a, &b| rows[b].at.cmp(&rows[a].at).then(b.cmp(&a)));
+    idx.into_iter().map(|i| rows[i].clone()).collect()
+}
+
+/// The players (low bits of the id) of every group, newest group first.
+fn players(rows: &[Battle], groups: &[Vec<usize>]) -> Vec<Vec<u128>> {
+    groups
+        .iter()
+        .map(|g| {
+            let mut v: Vec<u128> = g.iter().map(|&i| rows[i].player.as_u128() & 0xffff).collect();
+            v.sort();
+            v
+        })
+        .collect()
+}
+
+#[test]
+fn public_matches_group_by_sector_window_and_pilot() {
+    let w = chrono::Duration::seconds(MATCH_WINDOW_SECS);
+    let rows = newest_first(vec![
+        // 1:1 in sector 0, both reports within seconds.
+        mrow(1, Some("Ace One"), 0, 0, "hsd", Some(true), 50, 1),
+        mrow(2, None, 7, 0, "prf", Some(false), 0, 0),
+        // The same two pilots again ten minutes later: a new match.
+        mrow(1, Some("Ace One"), 600, 0, "hsd", Some(false), 0, 0),
+        mrow(2, None, 610, 0, "prf", Some(true), 100, 2),
+        // Window: 120 s after the first report still joins, 121 s starts a new match.
+        mrow(3, None, 1000, 1, "hsd", Some(true), 10, 1),
+        mrow(4, None, 1120, 1, "prf", Some(false), 0, 0),
+        mrow(5, None, 1121, 1, "prf", Some(false), 0, 0),
+        // At the same time in another sector: its own match.
+        mrow(6, None, 1000, 2, "rb", Some(true), 10, 1),
+        // A pilot reports twice within the window (two short matches): the second
+        // report starts a new match, later reports join that one.
+        mrow(7, None, 2000, 0, "hsd", Some(true), 10, 1),
+        mrow(8, None, 2005, 0, "prf", Some(false), 0, 0),
+        mrow(7, None, 2030, 0, "hsd", Some(false), 0, 0),
+        mrow(9, None, 2040, 0, "prf", Some(true), 10, 1),
+    ]);
+    let g = group_matches(&rows, w, true);
+    assert_eq!(
+        players(&rows, &g),
+        vec![vec![7, 9], vec![7, 8], vec![5], vec![3, 4], vec![6], vec![1, 2], vec![1, 2]],
+        "newest match first (by its last report)"
+    );
+    // Same round, turn and sector only: another turn never joins.
+    let mut other = mrow(2, None, 7, 0, "prf", Some(false), 0, 0);
+    other.turn = 4;
+    let rows = newest_first(vec![mrow(1, None, 0, 0, "hsd", Some(true), 0, 0), other]);
+    assert_eq!(group_matches(&rows, w, true).len(), 2);
+
+    // The query hit its row limit: a match that began within the window of the
+    // oldest row may miss reports and is left out; later ones stay.
+    let rows = newest_first(vec![
+        mrow(1, None, 0, 0, "hsd", Some(true), 0, 0),
+        mrow(2, None, 60, 0, "prf", Some(false), 0, 0),
+        mrow(3, None, 100, 1, "hsd", Some(true), 0, 0),
+        mrow(4, None, 121, 2, "prf", Some(false), 0, 0),
+    ]);
+    assert_eq!(players(&rows, &group_matches(&rows, w, true)), vec![vec![4], vec![3], vec![1, 2]]);
+    assert_eq!(players(&rows, &group_matches(&rows, w, false)), vec![vec![4]]);
+    assert!(group_matches(&[], w, false).is_empty());
+}
+
+#[test]
+fn public_match_winner_rules() {
+    assert_eq!(pilot_result(&[1, 2, 3, 4, 5, 1, 1, 0, 0, 0]), Some("win"));
+    assert_eq!(pilot_result(&[1, 2, 3, 4, 5, 0, 1, 0, 0, 0]), Some("loss"));
+    assert_eq!(pilot_result(&[1, 2, 3, 4, 5, 0, 0, 0, 0, 0]), None, "no mission played");
+    assert_eq!(pilot_result(&[50]), None, "no stats");
+    assert_eq!(side_result(&[Some("win"), None, Some("win")]), Some("win"));
+    assert_eq!(side_result(&[Some("win"), Some("loss")]), Some("mixed"));
+    assert_eq!(side_result(&[None, None]), None);
+    let (h, p, r) = (0usize, 1usize, 2usize);
+    // The side whose pilots reported a win.
+    assert_eq!(match_winner(&[(h, Some("loss")), (p, Some("win"))]), (Some("prf"), None));
+    assert_eq!(match_winner(&[(h, Some("win")), (p, Some("loss")), (r, Some("loss"))]), (Some("hsd"), None));
+    assert_eq!(match_winner(&[(h, Some("win")), (p, None)]), (Some("hsd"), None), "the loser sent no result");
+    // Reports contradict: two winners, or one side disagrees with itself.
+    assert_eq!(match_winner(&[(h, Some("win")), (p, Some("win"))]), (None, Some("conflict")));
+    assert_eq!(match_winner(&[(h, Some("mixed")), (p, Some("loss"))]), (None, Some("conflict")));
+    // Nobody won.
+    assert_eq!(match_winner(&[(h, Some("loss")), (p, Some("loss"))]), (Some("draw"), None));
+    // Only one side reported.
+    assert_eq!(match_winner(&[(p, Some("win"))]), (Some("prf"), Some("one_side")));
+    assert_eq!(match_winner(&[(p, Some("loss"))]), (None, Some("one_side")));
+    assert_eq!(match_winner(&[(h, None), (p, None)]), (None, None));
+}
+
+#[test]
+fn public_matches_twelve_pilots_in_one_battle() {
+    let c = cfg();
+    let mut snap = snapshot();
+    // 6 against 6 in turn 3, first map (sector 6 with map_base 0), the twelve
+    // reports spread over 78 s; pilots 1..6 are ranked (they have profiles).
+    let mut rows = Vec::new();
+    for k in 0..6u128 {
+        let name = snap.standings[k as usize].name.clone();
+        rows.push(mrow(k + 1, name.as_deref(), (k * 15) as i64, 0, "prf", Some(true), 55 - k as i64, 1));
+        rows.push(mrow(20 + k, None, (k * 15 + 3) as i64, 0, "hsd", Some(false), 0, 0));
+    }
+    // 5 against 3 a quarter of an hour later in the second map.
+    for k in 0..5u128 {
+        rows.push(mrow(40 + k, None, 900 + k as i64, 1, "rb", Some(false), 10, 0));
+    }
+    for k in 0..3u128 {
+        rows.push(mrow(50 + k, None, 905 + k as i64, 1, "hsd", Some(true), 100, 3));
+    }
+    snap.match_rows = newest_first(rows);
+    let groups = group_matches(&snap.match_rows, chrono::Duration::seconds(MATCH_WINDOW_SECS), true);
+    assert_eq!(groups.iter().map(Vec::len).collect::<Vec<_>>(), vec![8, 12]);
+
+    let (doc, _) = build_all(&c, &snap, &mut Placeholders::new(&[7u8; 32], &c.season));
+    let text = String::from_utf8(render(&doc).unwrap()).unwrap();
+    let mut found = BTreeSet::new();
+    keys(&doc, &mut found);
+    let unknown: Vec<&String> = found.iter().filter(|k| !KEYS.contains(&k.as_str())).collect();
+    assert!(unknown.is_empty(), "keys outside the whitelist: {unknown:?}");
+    assert_no_ids(&text, &(1..=60u128).map(uid).collect::<Vec<_>>());
+
+    let m = doc["matches"].as_array().unwrap();
+    assert_eq!(m.len(), 2);
+    let five_three = &m[0];
+    assert_eq!(five_three["at"], "2026-11-26T20:15:00Z", "last report 20:15:07, to the minute");
+    assert_eq!(five_three["sector"], 7);
+    assert_eq!(five_three["winner"], "hsd");
+    assert_eq!(five_three["note"], Value::Null);
+    assert_eq!(five_three["sides"][0]["side"], "hsd", "the winner first");
+    assert_eq!(five_three["sides"][0]["pilots"].as_array().unwrap().len(), 3);
+    assert_eq!(five_three["sides"][0]["points"], 300);
+    assert_eq!(five_three["sides"][0]["kills"], 9);
+    assert_eq!(five_three["sides"][1]["side"], "rb");
+    assert_eq!(five_three["sides"][1]["result"], "loss");
+    assert_eq!(five_three["sides"][1]["pilots"].as_array().unwrap().len(), 5);
+
+    let six = &m[1];
+    assert_eq!(six["turn"], 3);
+    assert_eq!(six["sector"], 6);
+    assert_eq!(six["at"], "2026-11-26T20:01:00Z", "last report 20:01:18");
+    assert_eq!(six["winner"], "prf");
+    let prf = &six["sides"][0];
+    assert_eq!(prf["side"], "prf");
+    assert_eq!(prf["result"], "win");
+    assert_eq!(prf["points"], 55 + 54 + 53 + 52 + 51 + 50);
+    assert_eq!(prf["kills"], 6);
+    let pilots = prf["pilots"].as_array().unwrap();
+    assert_eq!(pilots.len(), 6);
+    // Best first; ranked pilots carry their profile slug, the others none.
+    assert_eq!(pilots[0]["points"], 55);
+    assert_eq!(pilots[0]["pilot"], "Ace One");
+    assert_eq!(pilots[5]["points"], 50);
+    assert!(pilots.iter().all(|p| p["slug"].as_str().is_some_and(valid_slug)), "{pilots:?}");
+    let hsd = &six["sides"][1];
+    assert_eq!(hsd["result"], "loss");
+    let hp = hsd["pilots"].as_array().unwrap();
+    assert_eq!(hp.len(), 6);
+    assert!(hp.iter().all(|p| p["pilot"].as_str().unwrap().starts_with("Pilot #") && p.get("slug").is_none()));
+    // Every pilot once.
+    let names: HashSet<&str> = six["sides"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|s| s["pilots"].as_array().unwrap().iter().map(|p| p["pilot"].as_str().unwrap()))
+        .collect();
+    assert_eq!(names.len(), 12);
+
+    // `[public] matches` limits the list; battles[] stays as it was.
+    let c1 = PublicConfig { matches: 1, ..cfg() };
+    let doc1 = build(&c1, &snap, &mut Placeholders::new(&[7u8; 32], &c.season));
+    assert_eq!(doc1["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(doc1["matches"][0]["sector"], 7);
+    assert_eq!(doc1["battles"], doc["battles"]);
+
+    // A contradiction: both sides report a win.
+    snap.match_rows = newest_first(vec![
+        mrow(1, Some("Ace One"), 0, 2, "hsd", Some(true), 50, 1),
+        mrow(2, None, 4, 2, "prf", Some(true), 50, 1),
+    ]);
+    let doc = build(&c, &snap, &mut Placeholders::new(&[7u8; 32], &c.season));
+    assert_eq!(doc["matches"][0]["winner"], Value::Null);
+    assert_eq!(doc["matches"][0]["note"], "conflict");
+    assert_eq!(doc["matches"][0]["sides"][0]["side"], "hsd", "no winner: game order");
+}
+
+#[test]
+fn public_fit_matches_shortens_only_matches() {
+    let list: Vec<String> = (0..40).map(|i| "x".repeat(100 + i)).collect();
+    let mut doc = serde_json::json!({"battles": [1, 2, 3], "matches": list});
+    let full = render(&doc).unwrap().len();
+    fit_matches(&mut doc, full);
+    assert_eq!(doc["matches"].as_array().unwrap().len(), 40, "fits: unchanged");
+    fit_matches(&mut doc, 2000);
+    let n = doc["matches"].as_array().unwrap().len();
+    assert!(n > 0 && n < 40, "{n}");
+    assert!(render(&doc).unwrap().len() <= 2000);
+    assert_eq!(doc["matches"][0].as_str().unwrap().len(), 100, "the newest stay");
+    assert_eq!(doc["battles"].as_array().unwrap().len(), 3);
+    fit_matches(&mut doc, 10);
+    assert!(doc["matches"].as_array().unwrap().is_empty());
 }
 
 fn md_has(turn: &Value, text: &str) -> bool {
@@ -988,6 +1234,24 @@ async fn db_public_export_hides_banned_suspended_and_annulled() {
             assert!(!t.contains(hidden.as_str()));
         }
     }
+    // W529: matches come from the same filtered results: no banned, suspended or
+    // annulled report; the ace's sector-0 match (the banned pilot also reported
+    // there) shows the ace alone, as a one-sided report.
+    assert!(snap.match_rows_complete);
+    let mr: HashSet<Uuid> = snap.match_rows.iter().map(|b| b.player).collect();
+    assert_eq!(mr, HashSet::from([a.0, n.0]));
+    let matches = doc["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 3, "three sectors, three matches: {matches:?}");
+    for m in matches {
+        assert_eq!(m["note"], "one_side", "{m}");
+        assert_eq!(m["sides"].as_array().unwrap().len(), 1);
+    }
+    let m0 = matches.iter().find(|m| m["turn"] == 1 && m["sector"] == 0).unwrap();
+    assert_eq!(m0["winner"], "hsd");
+    assert_eq!(m0["sides"][0]["pilots"].as_array().unwrap().len(), 1);
+    assert_eq!(m0["sides"][0]["pilots"][0]["pilot"], ace.as_str());
+    let m1 = matches.iter().find(|m| m["turn"] == 1 && m["sector"] == 1).unwrap();
+    assert_eq!(m1["winner"], Value::Null, "one side lost, the other sent nothing");
     let ace_file = &files.iter().find(|(_, f)| f["pilot"] == ace.as_str()).unwrap().1;
     assert_eq!(ace_file["battles"].as_array().unwrap().len(), 2);
     assert_eq!(ace_file["history"][0]["turn"], 1);

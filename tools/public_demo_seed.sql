@@ -87,4 +87,55 @@ END $$;
 INSERT INTO wartide (round, "map", prf) VALUES (1, 12, 2500)
 ON CONFLICT (round, "map") DO UPDATE SET prf = wartide.prf + excluded.prf;
 
+-- W529: whole battles in the last hours of turn 4 (every pilot of a match
+-- reports within seconds): 1:1, 2:2, 6:6, 5:3, 2:2:2, a contradiction (both
+-- sides report a win), a one-sided report, a draw, and a match with a banned
+-- pilot (left out of the export). Pilot n is the n-th demo name; its side is
+-- hsd for n % 3 = 0, prf for 1, rb for 2. The random results above end five
+-- hours ago, so these are the newest.
+UPDATE gateway_result SET at = at - INTERVAL '5 hours' WHERE round = 1 AND turn = 4;
+CREATE FUNCTION pg_temp.demo_report(n int, mins numeric, m int, win bool, kp int, kills int) RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE
+    pid uuid := ('5342dead-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid;
+    iid uuid;
+    side text := (ARRAY['hsd', 'prf', 'rb'])[1 + (n % 3)];
+    st bigint[] := ARRAY[kills * 9 + 4, kills * 20 + 30, kills, kp, (NOT win)::int, win::int, 1, 0, 0, 0];
+BEGIN
+    SELECT identity_id INTO iid FROM core.identity WHERE player_id = pid;
+    INSERT INTO gateway_result (at, identity_id, player_id, kind, round, turn, "map", faction, points)
+    VALUES (now() - mins * INTERVAL '1 minute', iid, pid, 'user_points', 1, 4, m, side::faction, st),
+           (now() - mins * INTERVAL '1 minute', iid, pid, 'mission_points', 1, 4, m, side::faction,
+            ARRAY[CASE WHEN win THEN 60 ELSE 10 END]::bigint[]);
+END $$;
+-- One match: winners and losers (pilot numbers), minutes ago, map; reports 4 s apart.
+CREATE FUNCTION pg_temp.demo_match(mins int, m int, winners int[], losers int[]) RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE k int := 0; n int;
+BEGIN
+    FOREACH n IN ARRAY winners LOOP
+        PERFORM pg_temp.demo_report(n, mins - k * 4 / 60.0, m, true, 50 + (n * 37) % 250, 1 + n % 3);
+        k := k + 1;
+    END LOOP;
+    FOREACH n IN ARRAY losers LOOP
+        PERFORM pg_temp.demo_report(n, mins - k * 4 / 60.0, m, false, (n * 13) % 60, n % 2);
+        k := k + 1;
+    END LOOP;
+END $$;
+SELECT pg_temp.demo_match(15, 2, ARRAY[1], ARRAY[3]);                                   -- 1:1 PRF beats HSD
+SELECT pg_temp.demo_match(35, 1, ARRAY[6, 9], ARRAY[2, 5]);                             -- 2:2 HSD beats RB
+SELECT pg_temp.demo_match(55, 3, ARRAY[4, 7, 10, 13, 16, 55], ARRAY[12, 15, 18, 21, 24, 57]); -- 6:6, two unnamed
+SELECT pg_temp.demo_match(80, 2, ARRAY[27, 19], ARRAY[]::int[]);                        -- contradiction
+SELECT pg_temp.demo_match(100, 1, ARRAY[8, 11], ARRAY[]::int[]);                        -- only RB reported
+SELECT pg_temp.demo_match(125, 3, ARRAY[22, 25, 28], ARRAY[14, 17, 20, 23, 26]);        -- 3 PRF beat 5 RB
+SELECT pg_temp.demo_match(150, 1, ARRAY[31, 58], ARRAY[30]);                            -- with the banned pilot
+SELECT pg_temp.demo_match(170, 2, ARRAY[]::int[], ARRAY[33, 29]);                       -- draw
+SELECT pg_temp.demo_match(190, 3, ARRAY[34, 37], ARRAY[36, 39]);                        -- 2:2
+SELECT pg_temp.demo_match(210, 2, ARRAY[32], ARRAY[42]);                                -- 1:1
+SELECT pg_temp.demo_match(230, 1, ARRAY[45, 48], ARRAY[40, 43, 35, 38]);                -- 2:2:2
+SELECT pg_temp.demo_match(250, 3, ARRAY[46], ARRAY[51]);                                -- 1:1
+SELECT pg_temp.demo_match(270, 2, ARRAY[49, 52, 1, 4], ARRAY[54, 3, 6, 9]);             -- 4:4
+SELECT pg_temp.demo_match(285, 1, ARRAY[44], ARRAY[18]);                                -- 1:1 RB beats HSD
+SELECT pg_temp.demo_match(295, 3, ARRAY[50, 53], ARRAY[7, 10]);                         -- 2:2 RB beats PRF
+
 COMMIT;
