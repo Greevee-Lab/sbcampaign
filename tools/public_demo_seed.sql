@@ -41,7 +41,8 @@ BEGIN
         -- RB joins in turn 3.
         FOR t IN (CASE WHEN side = 'rb' THEN 3 ELSE 1 END)..4 LOOP
             FOR k IN 1..(1 + floor(random() * 3))::int LOOP
-                m := floor(random() * 3)::int;
+                -- Map 1..3 within the turn, as the game sends it.
+                m := 1 + floor(random() * 3)::int;
                 st := ARRAY[
                     (40 + random() * 160)::int, (150 + random() * 250)::int, (random() * 6)::int,
                     (random() * 900)::int, (random() * 4)::int, (random() < 0.5)::int, 1,
