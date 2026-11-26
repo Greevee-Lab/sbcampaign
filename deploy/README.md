@@ -488,6 +488,13 @@ kills, deaths, wins, sorties, captures}`, `battles[] {at, turn, sector, side,
 pilot, result (win|loss|null), points, kills}`, `totals {ranked_pilots,
 battles_round}`.
 
+Sectors and maps: in turn t the game offers missions 3t-2, 3t-1, 3t and
+sends `map = ((mission - 1) % 3) + 1`, i.e. 1..3 per turn (`[public]
+map_base = 1`, the default since W525). So the war tide's `map_id` is the
+mission number 1..24 and `sectors[i]` is mission i+1; `[public]
+sector_names` takes the 24 mission names (list in the config template). A
+battle outside this round's 24 sectors gets `sector: null`.
+
 Meaning of `leaderboard.stat1..10` (upstream rank categories,
 `src/command.rs`): 1 hits, 2 shots (accuracy = 1/2), 3 kills, 4 kill points,
 5 deaths, 6 mission victories, 7 missions played, 8 base captures, 9 capture

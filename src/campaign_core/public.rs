@@ -47,6 +47,8 @@ pub const SECTORS_PER_TURN: i16 = 3;
 pub const SECTOR_COUNT: i16 = TURNS_PER_ROUND * SECTORS_PER_TURN;
 /// First turn in which RB takes part (upstream `RB_START_TURN`).
 pub const RB_START_TURN: i16 = 3;
+/// First map number of a turn as the game sends it (1..=3 per turn).
+pub const DEFAULT_MAP_BASE: i16 = 1;
 /// Starting points per side in a sector share (upstream `war_tide`).
 const STARTING_POINTS: f64 = 300.0;
 /// Hard size limit of the file; a larger result is an error, never truncated JSON.
@@ -69,7 +71,9 @@ pub struct PublicConfig {
     pub name_key: PathBuf,
     pub leaderboard_size: usize,
     pub battles: usize,
-    /// Value the game uses for the first map of a turn (0 or 1).
+    /// Value the game uses for the first map of a turn (0 or 1). The game
+    /// sends 1..=3 (live data 26.11.2026: maps 1, 2 and 3 in turn 1), so the
+    /// default is 1.
     pub map_base: i16,
     pub sector_names: Vec<String>,
     pub side_names: [String; 3],
@@ -145,7 +149,7 @@ impl PublicConfig {
             }
         }
         let map_base = match p.get("map_base") {
-            None => 0,
+            None => DEFAULT_MAP_BASE,
             Some(v) => match v.as_integer() {
                 Some(0) => 0,
                 Some(1) => 1,
@@ -540,7 +544,11 @@ pub fn build(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) -> V
             })
         })
         .collect();
-    let infl = influence(&snap.sectors, period.turn);
+    // Only rows of this round's 24 sectors count (a row with another map
+    // number would otherwise shrink the unplayed share).
+    let in_round: Vec<SectorTide> =
+        snap.sectors.iter().filter(|t| (0..SECTOR_COUNT).contains(&(t.map_id - cfg.map_base))).cloned().collect();
+    let infl = influence(&in_round, period.turn);
 
     // Rankings: kill points, then kills, then the shown name.
     let mut rows: Vec<(String, &Standing)> =

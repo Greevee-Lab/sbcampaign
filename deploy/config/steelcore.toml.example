@@ -77,9 +77,21 @@ out_dir = "/var/lib/steelcore/public"
 name_key = "/var/lib/steelcore/public-name.key"
 leaderboard_size = 25
 battles = 30
-# Optional: 24 sector names (turn 1 map 1 .. turn 8 map 3), plain labels
-# only. Without them the page shows "Sector 1-A" .. "Sector 8-C".
-# sector_names = [ ... ]
+# First map number of a turn as the game sends it (1..3 per turn). Default 1.
+map_base = 1
+# 24 sector names (turn 1 map 1 .. turn 8 map 3), plain labels only. These
+# are the mission names of the Line of Contact campaign (mission n = sector
+# n). Without the list the page shows "Sector 1-A" .. "Sector 8-C".
+sector_names = [
+    "Sha Wan Hills", "Dong Lai River Ford", "Capture of Outpost 8",  # turn 1
+    "Occupation of Highland 33", "Ji Feng Military Base", "Hong Shan Military Base",  # turn 2
+    "Battle of Jian Da Harbor", "Zhong Huan City", "Reserve Base Siege",  # turn 3
+    "Jacalita Woodlands", "San Kuchen Subterranean Fortress", "Ji Feng Basin",  # turn 4
+    "Airbase Assault", "Wei Gu Strike", "Container Extraction",  # turn 5
+    "Nan Jiang Ravine", "New Nan Jiang Factory", "Battle of Meng Chang He",  # turn 6
+    "Yun Kota Gorge", "Xin Feng Tian Corridor", "Yu Jai Woodlands",  # turn 7
+    "Capture of Xin Feng Tian", "Er Ting Foothills", "Defense of Yu Jai Village",  # turn 8
+]
 # side_names = { hsd = "HSD", prf = "PRF", rb = "RB" }
 
 [gateway_steelbound]

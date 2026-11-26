@@ -23,6 +23,7 @@ fn cfg() -> PublicConfig {
         season = "Season 1"
         leaderboard_size = 3
         battles = 5
+        map_base = 0
     "#
     .parse()
     .unwrap();
@@ -140,6 +141,61 @@ fn public_config_defaults_and_refusals() {
     assert!(parse("[public]\ncampaign = \"a\"\nsector_names = [\"x\"]").is_err());
     let short = parse("[campaign]\nturn_minutes = 180\n[public]\ncampaign = \"steelbound-test\"").unwrap();
     assert_eq!(short.turn_length, Duration::from_secs(180 * 60));
+    assert_eq!(short.map_base, 1, "the game sends maps 1..=3 per turn");
+}
+
+/// The shipped config template carries the 24 mission names and the game's map base.
+#[test]
+fn public_config_template_has_sector_names() {
+    let root: toml::Table = include_str!("../../deploy/config/steelcore.toml.example").parse().unwrap();
+    let c = PublicConfig::from_toml(&root).unwrap();
+    assert_eq!(c.map_base, 1);
+    assert_eq!(c.sector_names.len(), 24);
+    assert_eq!(c.sector_names[0], "Sha Wan Hills");
+    assert_eq!(c.sector_names[23], "Defense of Yu Jai Village");
+    let doc = build(&c, &snapshot(), &mut Placeholders::new(&[7u8; 32], &c.season));
+    assert_eq!(doc["sectors"][10]["name"], "San Kuchen Subterranean Fortress");
+}
+
+/// Live data of 26.11.2026: turn 1 had war tide rows and battles on maps 1, 2
+/// and 3. With the default map base every one of them lands in a turn-1
+/// sector, no battle is "unknown" and no turn-2 sector shows points.
+#[test]
+fn public_default_map_base_places_live_maps() {
+    let root: toml::Table = "[ticket]\ncampaign = \"steelbound-s1\"\n[public]\nname = \"x\"".parse().unwrap();
+    let c = PublicConfig::from_toml(&root).unwrap();
+    assert_eq!(c.map_base, 1);
+    let mut snap = snapshot();
+    snap.period.turn = 1;
+    snap.sectors = vec![
+        SectorTide { map_id: 1, points: [0, 60, 0] },
+        SectorTide { map_id: 2, points: [60, 60, 0] },
+        SectorTide { map_id: 3, points: [0, 60, 0] },
+        SectorTide { map_id: 0, points: [9, 9, 9] },
+    ];
+    for b in &mut snap.battles {
+        b.turn = 1;
+    }
+    snap.battles[0].map = 2;
+    snap.battles[1].map = 3;
+    snap.battles[2].map = 1;
+    let doc = build(&c, &snap, &mut Placeholders::new(&[7u8; 32], &c.season));
+    let sectors = doc["sectors"].as_array().unwrap();
+    assert_eq!(sectors[0]["leader"], "prf");
+    assert_eq!(sectors[1]["leader"], Value::Null, "tie");
+    assert_eq!(sectors[1]["played"], true);
+    assert_eq!(sectors[2]["leader"], "prf");
+    assert_eq!(sectors[2]["name"], "Sector 1-C");
+    assert_eq!(sectors[3]["played"], false, "turn 2 untouched");
+    assert_eq!(sectors[3]["turn"], 2);
+    let sides = doc["sides"].as_array().unwrap();
+    assert_eq!(sides[1]["sectors_held"], 2);
+    assert_eq!(sides[1]["war_points"], 180, "the map-0 row is not part of the round");
+    // 2 won + 21 unplayed / 2 for PRF, 0 + 10.5 for HSD (map 0 ignored).
+    assert_eq!(sides[1]["influence"], 54);
+    let b = doc["battles"].as_array().unwrap();
+    assert_eq!(b.iter().map(|x| x["sector"].as_i64()).collect::<Vec<_>>(), [Some(1), Some(2), Some(0)]);
+    assert_eq!(sector_of(1, 0, 1), None, "map 0 is not a game map with the default");
 }
 
 // ---- Game formulas -------------------------------------------------------
