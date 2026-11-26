@@ -484,9 +484,24 @@ Fields (schema 1): `generated_at`, `campaign {id, name, season}`, `period
 sectors_held, influence, trend {last_24h, prev_24h}}`, `sectors[24] {index,
 turn, slot, name, state (closed|contested|upcoming), played, points, share,
 leader}`, `leaderboards {overall, hsd, prf, rb}[] {rank, pilot, side, points,
-kills, deaths, wins, sorties, captures}`, `battles[] {at, turn, sector, side,
-pilot, result (win|loss|null), points, kills}`, `totals {ranked_pilots,
-battles_round}`.
+kills, deaths, wins, sorties, captures, hits, shots, base_captures,
+capture_count, tippings}`, `pilots[] {pilot, side, round {..}, turn {..} |
+null}`, `battles[] {at, turn, sector, side, pilot, result (win|loss|null),
+points, kills}`, `totals {ranked_pilots, ranked_pilots_turn, battles_round}`.
+
+Rankings (W526): `pilots` is the full ranking list, every ranked pilot of
+the round in kill-point order with two blocks of the ten sums, `round` and
+`turn` (the current turn only, `null` without games this turn): `hits,
+shots, kills, points, deaths, wins, sorties, base_captures, capture_count,
+tippings`. The page ranks any category and side from it, like the game's
+rank screen (round or turn). More than `[public] ranking_pilots` (default
+200, at most 250) pilots: the leaders of every single sum (round and turn)
+stay first, the rest follows kill points; `totals.ranked_pilots` is always
+the real count. The largest configuration stays below the 256 KiB limit
+(test). The file is written compact (no indentation) since W526. Names:
+`sorties` is "missions played" (stat7); the W524 field `captures` in
+`leaderboards` is stat8, the **base** captures, and keeps that meaning (=
+`base_captures`); stat9 is `capture_count`.
 
 Sectors and maps: in turn t the game offers missions 3t-2, 3t-1, 3t and
 sends `map = ((mission - 1) % 3) + 1`, i.e. 1..3 per turn (`[public]
@@ -498,7 +513,12 @@ battle outside this round's 24 sectors gets `sector: null`.
 Meaning of `leaderboard.stat1..10` (upstream rank categories,
 `src/command.rs`): 1 hits, 2 shots (accuracy = 1/2), 3 kills, 4 kill points,
 5 deaths, 6 mission victories, 7 missions played, 8 base captures, 9 capture
-count, 10 tippings. The page ranks by kill points, then kills.
+count, 10 tippings. Upstream rank categories (`RankCategory`): weapon
+accuracy (1/2, at least 200 shots per round or 50 per turn), kill count,
+kill points, death count, mission victories (6/7, at least 20 missions per
+round or 5 per turn), base captures, capture count, tippings; awards for
+accuracy, kill points, mission victories and base captures. `leaderboards`
+rank by kill points, then kills.
 
 **Setup** (once, production database only):
 
