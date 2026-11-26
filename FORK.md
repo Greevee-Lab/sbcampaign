@@ -62,6 +62,7 @@ of the campaign core of [steelcore](https://github.com/Greevee-Lab/steelcore).
 | Fix: buying an unlimited VT (`vtstock` NULL) set its stock to 0 (`GREATEST(NULL - n, 0)` is 0 in PostgreSQL), so the VT vanished from every shop until the next restock | `src/command.rs` (`vt_add`) | **yes** (see below) |
 | Core split: players, identities, display names, accesses, idempotency keys and the Core API audit move into schema `core` (takeover with row count and md5 check, way back, own connection pool with `search_path = core`); the campaign keeps schema `public` and refers to the core by value only | `sql/fork/core_split.sql`, `sql/fork/core_unsplit.sql`, `sql/fork/gateway_annul.sql` (schema-qualified), `src/campaign_core/mod.rs` (`connect_core`), `src/campaign_core/identity.rs`, `src/campaign_core/profile.rs`, `src/main.rs` (open the core pool), `tools/test_core_split.sh` | no |
 | Season reset that keeps the core: `campaign_reset()` empties every campaign table, refills the shop, starts round 1 / turn 1 and checks that the core did not change; maintenance units with backup first; restore keeps the core unless asked; test-first deploy (`releases/test`, `deploy.sh --test`) | `sql/fork/season_reset.sql`, `deploy/server/maint.sh`, `deploy/server/restore.sh`, `deploy/server/activate.sh`, `deploy/deploy.sh`, `deploy/units/steelcore-maint.service`, `deploy/units/steelcore-test-*.service`, `src/campaign_core/reset_tests.rs`, `tools/test_activate.sh` | no |
+| Trades in the chat room: the token is bound to the identity that asked for it and to the named partner pilot, expires, is used once per command and is never 0; exactly the issuer and the partner meet; VTs move only if both report the same swap and the giver owns every VT, both sides in one transaction (upstream paired the commands with a barrier only) | `src/command.rs`, `src/campaign_core/trade_tests.rs` | yes, after review (see "Trades") |
 
 ## Players, identities and the core boundary
 
@@ -339,3 +340,39 @@ shop (`COALESCE(vtstock, 1) > 0`) until the turn restock. MySQL returns
 NULL there, which is probably why it worked before the port. The fix is
 `vtstock = vtstock - LEAST(vtstock, $3)` (NULL stays NULL, otherwise the
 same as before). Candidate for a small pull request.
+
+## Trades
+
+The game trades in a chat room of the Neutral Zone. The two players agree over
+their peer-to-peer link. Then the side with the lower player index sends
+TradeToken (`0x104A`) with the partner's **pilot name** and passes the token
+to the partner over the same link (a token of 0 means "no token yet" to the
+game). Both sides send TradeUserInfo (`0x104B`: partner name, token, their
+pilot data after the trade) and TradeVT (`0x1045`: token, partner name, VTs
+received, VTs given).
+
+Upstream paired the two commands of a trade with a barrier only. Any client
+could claim any VT by type and serial (the partner did not have to own or give
+it), a client could pair a trade with itself over two connections, and the
+first token was 0. The fork keeps the protocol and adds the checks:
+
+- A token is bound to the identity that asked for it and to the named partner
+  pilot. The pilot name comes from the stored pilot data (offset 0x28, compared
+  without case and trailing padding), not from `xname`, which holds the
+  gamertag. Tokens expire after 180 s, are used once per command, are never 0;
+  one open token per identity, at most 4096 at once.
+- Exactly the issuer and the named partner meet: two different identities with
+  a faction that name each other. The first side waits up to 10 s.
+- TradeVT: both sides must report the same swap (what one gives, the other
+  receives), no VT twice, at most 16 per side, and the giver must own every VT
+  it gives (not sortied). The second side applies both directions in one
+  transaction; any failure rolls everything back and both sides get an error
+  ("Trade failed." in the game).
+- TradeUserInfo: paired the same way; both pilot records are written in one
+  transaction.
+
+Tests: `command::trade_tests` (token, names, pairing, swap check, rendezvous)
+and `campaign_core::trade_tests::db_trade_swaps_owned_vts_and_refuses_theft`
+(a real swap, a refused theft with an accomplice, a refused one-sided claim,
+a token used twice, a trade with oneself).
+
