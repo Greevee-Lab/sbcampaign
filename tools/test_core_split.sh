@@ -173,7 +173,8 @@ grep -q "core=$players players, " "$work/status/status.txt" || fail "status: cor
 [ "$(q "SELECT count(*) FROM pg_tables WHERE schemaname = 'public' AND tablename IN ('player', 'identity', 'provider', 'display_name', 'display_name_reservation', 'display_name_blocklist', 'api_access', 'api_idempotency')")" = 0 ] ||
   fail "old core tables still in public"
 [ "$(q "SELECT count(*) FROM audit_log")" = "$game_audit_before" ] || fail "campaign audit rows changed"
-[ "$(q "SELECT count(*) FROM pg_constraint WHERE contype = 'f' AND connamespace = 'public'::regnamespace")" = 0 ] ||
+# Campaign tables may reference each other (e.g. battle_vt -> gateway_result), never the core.
+[ "$(q "SELECT count(*) FROM pg_constraint c JOIN pg_class r ON r.oid = c.confrelid WHERE c.contype = 'f' AND c.connamespace = 'public'::regnamespace AND r.relnamespace = 'core'::regnamespace")" = 0 ] ||
   fail "campaign tables still reference the core"
 [ "$(q "SELECT md5(string_agg(x::text, chr(10) ORDER BY x::text)) FROM accounts x")" = "$campaign_before" ] || fail "accounts changed"
 echo "   core: $(tr '\n' ';' <"$work/after.txt" | sed 's/ [0-9a-f]\{32\};/; /g')"
