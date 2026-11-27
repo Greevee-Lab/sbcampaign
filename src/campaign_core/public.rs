@@ -66,6 +66,12 @@ pub const MATCH_ROWS: usize = 1200;
 pub const MATCH_WINDOW_SECS: i64 = 120;
 /// W529: `matches[]` gives way (oldest first) when the document would grow past this.
 pub const MATCH_FIT_BYTES: usize = MAX_BYTES * 95 / 100;
+/// W531: results read for `killed_by_type` (only since the VT recording began).
+pub const VT_ROWS: usize = 20_000;
+/// W531: VT names longer than this are cut (the longest in the catalog has 17).
+const MAX_VT_CHARS: usize = 20;
+/// W531: most driven VTs per side.
+const TOP_VTS: usize = 3;
 /// Upper bound of `[public] ranking_pilots` (the full ranking list, `pilots`).
 const MAX_PILOTS: usize = 250;
 /// Longest display name that is shown (the name rules allow 15 characters).
@@ -251,6 +257,8 @@ pub struct Battle {
     pub player: Uuid,
     pub name: Option<String>,
     pub points: Vec<i64>,
+    /// W531: the VT type of the battle (`battle_vt`), if known.
+    pub vt: Option<i16>,
 }
 
 /// Sums of one player in one turn of the round (pilot history, awards).
@@ -294,6 +302,19 @@ pub struct Snapshot {
     pub match_rows: Vec<Battle>,
     /// W529: false when the query hit `MATCH_ROWS` (older results exist).
     pub match_rows_complete: bool,
+    /// W531: VT names by type (`shop.name`).
+    pub vt_names: HashMap<i16, String>,
+    /// W531: first recorded sortie (the VT statistics start there); None = none yet.
+    pub vt_since: Option<DateTime<Utc>>,
+    /// W531: per player and own VT type of the round:
+    /// (player, type, battles, deaths, wins, kills, kill points).
+    pub pilot_vts: Vec<(Uuid, i16, i64, i64, i64, i64, i64)>,
+    /// W531: battles per side and VT type of the round.
+    pub side_vts: Vec<(String, i16, i64)>,
+    /// W531: the round's results since the VT recording began (newest first,
+    /// at most `VT_ROWS`), grouped like `matches[]` for `killed_by_type`.
+    pub vt_rows: Vec<Battle>,
+    pub vt_rows_complete: bool,
 }
 
 /// Players that never appear: banned accounts and players with a suspended identity.
@@ -359,10 +380,11 @@ pub async fn collect(pool: &PgPool, battles: usize, round: Option<i16>) -> Resul
         "g.annulled_at IS NULL AND g.round = $1 AND g.player_id NOT IN {HIDDEN}
          AND NOT EXISTS (SELECT 1 FROM core.identity i WHERE i.identity_id = g.identity_id AND i.suspended)"
     );
-    let rows: Vec<(DateTime<Utc>, i16, i16, String, Uuid, Option<String>, Vec<i64>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT g.at, g.turn, g.\"map\", g.faction::text, g.player_id, d.name, g.points
+    let rows: Vec<(DateTime<Utc>, i16, i16, String, Uuid, Option<String>, Vec<i64>, Option<i16>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT g.at, g.turn, g.\"map\", g.faction::text, g.player_id, d.name, g.points, v.vt_type
          FROM public.gateway_result g
          LEFT JOIN core.display_name d ON d.player_id = g.player_id
+         LEFT JOIN public.battle_vt v ON v.result_id = g.result_id
          WHERE g.kind = 'user_points' AND {open}
          ORDER BY g.at DESC, g.result_id DESC LIMIT $2"
     )))
@@ -372,7 +394,7 @@ pub async fn collect(pool: &PgPool, battles: usize, round: Option<i16>) -> Resul
     .await?;
     let battles = rows
         .into_iter()
-        .map(|(at, turn, map, faction, player, name, points)| Battle { at, turn, map, faction, player, name, points })
+        .map(|(at, turn, map, faction, player, name, points, vt)| Battle { at, turn, map, faction, player, name, points, vt })
         .collect();
     let battles_round: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT count(*) FROM public.gateway_result g WHERE g.kind = 'user_points' AND {open}"
@@ -440,12 +462,13 @@ pub async fn collect(pool: &PgPool, battles: usize, round: Option<i16>) -> Resul
         .map(|(player, turn, faction, s)| TurnRow { player, turn, faction, stats: ten(s) })
         .filter(|r| r.stats.iter().any(|&v| v != 0))
         .collect();
-    let rows: Vec<(DateTime<Utc>, i16, i16, String, Uuid, Option<String>, Vec<i64>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT g.at, g.turn, g.\"map\", g.faction::text, g.player_id, d.name, g.points
+    let rows: Vec<(DateTime<Utc>, i16, i16, String, Uuid, Option<String>, Vec<i64>, Option<i16>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT g.at, g.turn, g.\"map\", g.faction::text, g.player_id, d.name, g.points, v.vt_type
          FROM (SELECT g.*, row_number() OVER (PARTITION BY g.player_id ORDER BY g.at DESC, g.result_id DESC) AS nth
                FROM public.gateway_result g
                WHERE g.kind = 'user_points' AND {open}) g
          LEFT JOIN core.display_name d ON d.player_id = g.player_id
+         LEFT JOIN public.battle_vt v ON v.result_id = g.result_id
          WHERE g.nth <= $2
          ORDER BY g.at DESC, g.result_id DESC"
     )))
@@ -455,7 +478,7 @@ pub async fn collect(pool: &PgPool, battles: usize, round: Option<i16>) -> Resul
     .await?;
     let pilot_battles = rows
         .into_iter()
-        .map(|(at, turn, map, faction, player, name, points)| Battle { at, turn, map, faction, player, name, points })
+        .map(|(at, turn, map, faction, player, name, points, vt)| Battle { at, turn, map, faction, player, name, points, vt })
         .collect();
     let sector_counts: Vec<(Uuid, i16, i16, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT g.player_id, g.turn, g.\"map\", count(*) FROM public.gateway_result g
@@ -476,10 +499,11 @@ pub async fn collect(pool: &PgPool, battles: usize, round: Option<i16>) -> Resul
             .fetch_all(&mut *tx)
             .await?;
     // W529: the same results as `battles`, more of them, for grouping into matches.
-    let rows: Vec<(DateTime<Utc>, i16, i16, String, Uuid, Option<String>, Vec<i64>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT g.at, g.turn, g.\"map\", g.faction::text, g.player_id, d.name, g.points
+    let rows: Vec<(DateTime<Utc>, i16, i16, String, Uuid, Option<String>, Vec<i64>, Option<i16>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT g.at, g.turn, g.\"map\", g.faction::text, g.player_id, d.name, g.points, v.vt_type
          FROM public.gateway_result g
          LEFT JOIN core.display_name d ON d.player_id = g.player_id
+         LEFT JOIN public.battle_vt v ON v.result_id = g.result_id
          WHERE g.kind = 'user_points' AND {open}
          ORDER BY g.at DESC, g.result_id DESC LIMIT $2"
     )))
@@ -490,8 +514,61 @@ pub async fn collect(pool: &PgPool, battles: usize, round: Option<i16>) -> Resul
     let match_rows_complete = rows.len() < MATCH_ROWS;
     let match_rows = rows
         .into_iter()
-        .map(|(at, turn, map, faction, player, name, points)| Battle { at, turn, map, faction, player, name, points })
+        .map(|(at, turn, map, faction, player, name, points, vt)| Battle { at, turn, map, faction, player, name, points, vt })
         .collect();
+    // W531: VTs of the battles.
+    let names: Vec<(i16, String)> = sqlx::query_as("SELECT \"type\", name FROM public.shop").fetch_all(&mut *tx).await?;
+    let vt_names = names.into_iter().collect();
+    let vt_since: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT min(sortied_at) FROM public.battle_vt").fetch_one(&mut *tx).await?;
+    let pilot_vts: Vec<(Uuid, i16, i64, i64, i64, i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT g.player_id, v.vt_type, count(*),
+                COALESCE(SUM(g.points[5]), 0)::bigint,
+                count(*) FILTER (WHERE g.points[7] > 0 AND g.points[6] > 0),
+                COALESCE(SUM(g.points[3]), 0)::bigint,
+                COALESCE(SUM(g.points[4]), 0)::bigint
+         FROM public.gateway_result g JOIN public.battle_vt v ON v.result_id = g.result_id
+         WHERE g.kind = 'user_points' AND cardinality(g.points) = 10 AND {open}
+         GROUP BY g.player_id, v.vt_type"
+    )))
+    .bind(round)
+    .fetch_all(&mut *tx)
+    .await?;
+    let side_vts: Vec<(String, i16, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT g.faction::text, v.vt_type, count(*)
+         FROM public.gateway_result g JOIN public.battle_vt v ON v.result_id = g.result_id
+         WHERE g.kind = 'user_points' AND {open}
+         GROUP BY g.faction, v.vt_type"
+    )))
+    .bind(round)
+    .fetch_all(&mut *tx)
+    .await?;
+    // Results from one match window before the first sortie on: older ones
+    // cannot have a VT and cannot share a match with one that has.
+    let (vt_rows, vt_rows_complete) = match vt_since {
+        None => (Vec::new(), true),
+        Some(since) => {
+            let rows: Vec<(DateTime<Utc>, i16, i16, String, Uuid, Option<String>, Vec<i64>, Option<i16>)> =
+                sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                    "SELECT g.at, g.turn, g.\"map\", g.faction::text, g.player_id, NULL::text, g.points, v.vt_type
+                     FROM public.gateway_result g
+                     LEFT JOIN public.battle_vt v ON v.result_id = g.result_id
+                     WHERE g.kind = 'user_points' AND {open} AND g.at >= $2
+                     ORDER BY g.at DESC, g.result_id DESC LIMIT $3"
+                )))
+                .bind(round)
+                .bind(since - chrono::Duration::seconds(MATCH_WINDOW_SECS))
+                .bind(VT_ROWS as i64)
+                .fetch_all(&mut *tx)
+                .await?;
+            let complete = rows.len() < VT_ROWS;
+            let rows = rows
+                .into_iter()
+                .map(|(at, turn, map, faction, player, name, points, vt)| Battle { at, turn, map, faction, player, name, points, vt })
+                .collect();
+            (rows, complete)
+        }
+    };
     tx.rollback().await?;
     Ok(Snapshot {
         now,
@@ -508,6 +585,12 @@ pub async fn collect(pool: &PgPool, battles: usize, round: Option<i16>) -> Resul
         turn_ends,
         match_rows,
         match_rows_complete,
+        vt_names,
+        vt_since,
+        pilot_vts,
+        side_vts,
+        vt_rows,
+        vt_rows_complete,
     })
 }
 
@@ -765,6 +848,30 @@ pub fn pilot_result(points: &[i64]) -> Option<&'static str> {
     (points.len() == 10 && st(6) > 0).then(|| if st(5) > 0 { "win" } else { "loss" })
 }
 
+/// W531: kills per pilot and VT type of the destroyed VTs, only where that
+/// is clear: every pilot on the other sides of the match reported and drove
+/// the same VT type. The game reports only the number of kills, so in every
+/// other match the kills stay unassigned (they count in the sums).
+pub fn killed_by_type(rows: &[Battle], groups: &[Vec<usize>]) -> HashMap<Uuid, HashMap<i16, i64>> {
+    let mut out: HashMap<Uuid, HashMap<i16, i64>> = HashMap::new();
+    for g in groups {
+        for &i in g {
+            let p = &rows[i];
+            let kills = p.points.get(2).copied().unwrap_or(0);
+            let Some(side) = side_index(&p.faction) else { continue };
+            if kills <= 0 || p.points.len() != 10 {
+                continue;
+            }
+            let mut types = g.iter().map(|&j| &rows[j]).filter(|o| side_index(&o.faction).is_some_and(|s| s != side)).map(|o| o.vt);
+            let Some(Some(first)) = types.next() else { continue };
+            if types.all(|t| t == Some(first)) {
+                *out.entry(p.player).or_default().entry(first).or_insert(0) += kills;
+            }
+        }
+    }
+    out
+}
+
 /// Result of one side in a match: every reporting pilot agrees (`win`/`loss`),
 /// `mixed` when they do not, `None` when nobody reported a result.
 pub fn side_result(results: &[Option<&'static str>]) -> Option<&'static str> {
@@ -867,6 +974,15 @@ pub fn build_all(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) 
     // Everyone has a number now: read-only from here on.
     let names: &Placeholders = names;
     let shown = |player: &Uuid, name: Option<&str>| clean_name(name).unwrap_or_else(|| names.label(player));
+    // W531: VT name by type (shop name; a type without a shop entry gets "VT <type>").
+    let vt_name = |t: i16| -> String {
+        snap.vt_names
+            .get(&t)
+            .map(|n| n.trim().chars().take(MAX_VT_CHARS).collect::<String>())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| format!("VT {t}"))
+    };
+    let vt_of = |b: &Battle| b.vt.map(vt_name);
 
     // Sectors of the round.
     let mut tide_by_index: HashMap<usize, [i64; 3]> = HashMap::new();
@@ -1038,6 +1154,13 @@ pub fn build_all(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) 
             pilot_points[i] += s.stats[3];
         }
     }
+    // W531: most driven VTs per side (battles with a known VT).
+    let top_vts = |side: &str| -> Vec<Value> {
+        let mut v: Vec<(String, i64)> =
+            snap.side_vts.iter().filter(|(f, _, _)| f == side).map(|&(_, t, n)| (vt_name(t), n)).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        v.into_iter().take(TOP_VTS).map(|(n, k)| json!({"vt": n, "battles": k})).collect()
+    };
     let sides: Vec<Value> = SIDES
         .iter()
         .enumerate()
@@ -1054,6 +1177,7 @@ pub fn build_all(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) 
                 "sectors_held": held[i],
                 "influence": infl[i],
                 "trend": {"last_24h": c.last_24h, "prev_24h": c.prev_24h},
+                "top_vts": top_vts(side),
             })
         })
         .collect();
@@ -1075,6 +1199,7 @@ pub fn build_all(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) 
                 "sector": sector_of(b.turn, b.map, cfg.map_base),
                 "side": side_index(&b.faction).map(|i| SIDES[i]),
                 "pilot": shown(&b.player, b.name.as_deref()),
+                "vt": vt_of(b),
                 "result": result,
                 "points": st(3),
                 "kills": st(2),
@@ -1107,6 +1232,7 @@ pub fn build_all(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) 
                 let res = pilot_result(&b.points);
                 let mut p = json!({
                     "pilot": shown(&b.player, b.name.as_deref()),
+                    "vt": vt_of(b),
                     "result": res,
                     "points": st(3),
                     "kills": st(2),
@@ -1280,11 +1406,19 @@ pub fn build_all(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) 
             "turn": b.turn,
             "sector": sector_of(b.turn, b.map, cfg.map_base),
             "side": side_index(&b.faction).map(|i| SIDES[i]),
+            "vt": vt_of(b),
             "result": result,
             "points": st(3),
             "kills": st(2),
         })
     };
+    // W531: VT statistics per pilot (own VTs exact, destroyed VTs where clear).
+    let vt_groups = group_matches(&snap.vt_rows, chrono::Duration::seconds(MATCH_WINDOW_SECS), snap.vt_rows_complete);
+    let killed = killed_by_type(&snap.vt_rows, &vt_groups);
+    let mut own_vts: HashMap<Uuid, Vec<(i16, i64, i64, i64, i64, i64)>> = HashMap::new();
+    for &(player, t, driven, lost, wins, kills, points) in &snap.pilot_vts {
+        own_vts.entry(player).or_default().push((t, driven, lost, wins, kills, points));
+    }
     let mut pilot_docs: Vec<(String, Value)> = Vec::new();
     for (i, (n, s)) in rows.iter().enumerate() {
         if !listed.contains(&i) {
@@ -1307,6 +1441,21 @@ pub fn build_all(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) 
             .get(&s.player)
             .map(|a| a.iter().map(|&(t, c, r)| json!({"turn": t, "category": AWARD_CATEGORIES[c], "rank": r})).collect())
             .unwrap_or_default();
+        // Most driven first; on a tie more wins, then the name.
+        let mut mine: Vec<(String, i64, i64, i64, i64, i64)> = own_vts
+            .get(&s.player)
+            .map(|v| v.iter().map(|&(t, d, l, w, k, p)| (vt_name(t), d, l, w, k, p)).collect())
+            .unwrap_or_default();
+        mine.sort_by(|a, b| b.1.cmp(&a.1).then(b.3.cmp(&a.3)).then(a.0.cmp(&b.0)));
+        let favorite_vt = mine.first().map(|m| json!({"vt": m.0, "battles": m.1}));
+        let vts: Vec<Value> = mine
+            .iter()
+            .map(|(n, d, l, w, k, p)| json!({"vt": n, "driven": d, "lost": l, "wins": w, "kills": k, "points": p}))
+            .collect();
+        let mut kt: Vec<(String, i64)> =
+            killed.get(&s.player).map(|m| m.iter().map(|(&t, &n)| (vt_name(t), n)).collect()).unwrap_or_default();
+        kt.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let killed_types: Vec<Value> = kt.iter().map(|(n, k)| json!({"vt": n, "kills": k})).collect();
         let slug = slugs[&s.player].clone();
         pilot_docs.push((
             slug.clone(),
@@ -1321,6 +1470,9 @@ pub fn build_all(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) 
                 "turn": if s.turn_stats.iter().any(|&v| v != 0) { stat_block(&s.turn_stats) } else { Value::Null },
                 "history": history,
                 "favorite_sector": fav.get(&s.player).map(|&(n, i)| json!({"sector": i, "battles": n})),
+                "vts": vts,
+                "favorite_vt": favorite_vt,
+                "killed_by_type": killed_types,
                 "battles": battles,
                 "awards": awards,
             }),
@@ -1347,6 +1499,8 @@ pub fn build_all(cfg: &PublicConfig, snap: &Snapshot, names: &mut Placeholders) 
         "pilots": pilots,
         "battles": battles,
         "matches": matches,
+        // W531: the VT of a battle is known from this day on (UTC); null = not yet.
+        "vts_since": snap.vt_since.map(|t| t.format("%Y-%m-%d").to_string()),
         "totals": {
             "ranked_pilots": rows.len(),
             "ranked_pilots_turn": ranked_turn,

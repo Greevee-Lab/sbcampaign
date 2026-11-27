@@ -411,6 +411,8 @@ fn db_gateway_battle_vt() {
         let player = player_of(&pool, acc).await.unwrap();
         let other = Uuid::from_u128(0x5331_0000_0000_0000_0000_0000_0000_0013);
         // Garage: Vitzh (0) and Vortex (2) of the pilot, a Scare Face (8) of someone else.
+        // Rerunnable on the same database: the serials are fixed.
+        sqlx::query("DELETE FROM garage WHERE \"serial\" IN (953101, 953102, 953103)").execute(&pool).await.unwrap();
         for (t, s, owner) in [(0i16, 953_101i64, player), (2, 953_102, player), (8, 953_103, other)] {
             sqlx::query("INSERT INTO garage (\"type\", \"serial\", xuid, faction) VALUES ($1, $2, $3, 'hsd')")
                 .bind(t)

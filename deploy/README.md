@@ -498,6 +498,11 @@ leader, gap, margin} | null, discord_md (closed turns only)}`, `awards
 W529: `matches[] {at, turn, sector, winner (hsd|prf|rb|draw|null), note
 (one_side|conflict|null), sides[] {side, result (win|loss|mixed|null), points,
 kills, pilots[] {pilot, slug (listed pilots only), result, points, kills}}}`.
+W531: `battles[].vt`, `matches[].sides[].pilots[].vt`, pilot files
+`battles[].vt` (VT name or `null`), `sides[].top_vts[] {vt, battles}` (at most
+3), `vts_since` (UTC day of the first recorded sortie or `null`), pilot files
+`vts[] {vt, driven, lost, wins, kills, points}`, `favorite_vt {vt, battles} |
+null`, `killed_by_type[] {vt, kills}`.
 
 Pilot profiles, turn reports, awards (W527):
 
@@ -550,6 +555,27 @@ Pilot profiles, turn reports, awards (W527):
   a match that began within 120 s of the oldest one read is left out, as it
   may miss reports. `matches[]` gives way first (oldest matches) if the file
   would grow past 95 % of its limit; nothing else is shortened.
+- **VTs** (W531, table `battle_vt`, migration `fork/battle_vt.sql`): the
+  game names the VTs of a sortie in VtSortie (0x1047) at the start of a
+  mission; every VT of a sortie has the same type (the others are reserve VTs
+  for a respawn). The result (AddUserPoint 0x5026) carries no VT. The gateway
+  stores the type of every accepted sortie (only VTs the player owns on that
+  side; no serials) and links the newest open sortie of the same player and
+  side, at most 120 minutes old (`SORTIE_WINDOW_MINUTES`, mission clock 60:00
+  plus headroom), to the player's next `user_points` result. No sortie, an
+  older one, a sortie of the other side or a second result for one sortie:
+  the battle has no VT (`null`), nothing is guessed. Aborted missions leave an
+  open row that is never linked. **driven** = battles with that own VT,
+  **lost** = the game's deaths stat (stat5 = VTs lost in the mission), wins,
+  kills, kill points per own VT type (exact). **killed_by_type**: the game
+  reports only the number of kills, so kills count for a VT type only where it
+  is clear: every pilot on the other sides of the grouped match (as in
+  `matches[]`) reported and drove the same type; in every other match the
+  kills stay in the sums only. Limits: an opponent who did not report (or is
+  hidden: banned, suspended, annulled) is not seen. VT names come from
+  `shop.name` (cut at 20 characters; a type without a shop row is `VT <type>`).
+  VT ratings (`eng_data.eng`) are never read or exported. Statistics start
+  with the deploy of this version (`vts_since`); older battles have no VT.
 - **Discord text** (`turns[].discord_md`, closed turns only): ready-made
   markdown for the steward, nothing posts it. Names and sector names are
   stripped of markdown, mention and link characters. Example:
