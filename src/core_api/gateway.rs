@@ -51,6 +51,24 @@ pub struct ResultRecord {
 /// One row of the write audit. Who (identity, player), which command, when
 /// (set by the store), how it ended. Never contents: no names, no pilot data,
 /// no points.
+/// W531: a result is linked to a sortie of at most this age. A campaign
+/// mission lasts at most 60 minutes after the sortie (mission clock 60:00);
+/// the rest is headroom for the debriefing and slow reports. An older open
+/// sortie belongs to an aborted mission and is never linked.
+pub const SORTIE_WINDOW_MINUTES: i32 = 120;
+
+/// W531: the VTs of an accepted sortie (VtSortie 0x1047), in the game's order.
+/// The core keeps only VTs the player owns on that side and links the sortie
+/// to the player's next user_points result (`record_result`).
+#[derive(Clone)]
+pub struct SortieRecord {
+    pub identity_id: Uuid,
+    pub player_id: Uuid,
+    pub faction: Faction,
+    /// (type, serial) per VT.
+    pub vts: Vec<(u16, u32)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameWrite {
     /// The gateway, for example "gateway-steelbound".
@@ -81,7 +99,12 @@ pub trait GatewayCore: Send + Sync + 'static {
     fn audit_game_write(&self, write: GameWrite) -> impl Future<Output = Result<(), StoreError>> + Send;
 
     /// Remember a result that was applied, so it can be annulled later.
+    /// W531: a user_points result is linked to the player's newest open
+    /// sortie of the same side (if any, within `SORTIE_WINDOW_MINUTES`).
     fn record_result(&self, record: ResultRecord) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// W531: remember the VTs of an accepted sortie (statistics only).
+    fn record_sortie(&self, record: SortieRecord) -> impl Future<Output = Result<(), StoreError>> + Send;
 
     /// Take back every not yet annulled result of an identity: subtract its
     /// leaderboard stats and war tide points (never below zero), mark the

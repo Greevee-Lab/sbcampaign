@@ -99,6 +99,15 @@ impl VTEntry {
     pub fn new(id: VTID, serial: u32) -> Self {
         VTEntry { id, serial }
     }
+
+    /// VT type (shop type).
+    pub fn id(&self) -> VTID {
+        self.id
+    }
+
+    pub fn serial(&self) -> u32 {
+        self.serial
+    }
 }
 
 pub type VTEntryList = Vec<VTEntry>;
