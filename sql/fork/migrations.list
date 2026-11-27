@@ -27,3 +27,4 @@ once        fork/shop_catalog.sql
 once        fork/core_split.sql
 repeatable  fork/gateway_annul.sql
 repeatable  fork/season_reset.sql
+once        fork/battle_vt.sql

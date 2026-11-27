@@ -48,6 +48,8 @@ const KEYS: &[&str] = &[
     "slug", "awards", "turns", "ends_at", "closest", "gap", "margin", "discord_md", "categories", "per_turn",
     // W529: battles grouped into matches.
     "matches", "winner", "note",
+    // W531: VTs (names only, never VT ratings).
+    "vt", "top_vts", "vts_since",
 ];
 
 /// Keys of a pilot file (W527).
@@ -55,6 +57,8 @@ const PILOT_KEYS: &[&str] = &[
     "schema", "campaign", "id", "period", "round", "turn", "pilot", "slug", "side", "hits", "shots", "kills", "points",
     "deaths", "wins", "sorties", "base_captures", "capture_count", "tippings", "history", "favorite_sector", "sector",
     "battles", "at", "result", "awards", "category", "rank",
+    // W531: VTs per pilot.
+    "vt", "vts", "driven", "lost", "favorite_vt", "killed_by_type",
 ];
 
 fn keys(v: &Value, out: &mut BTreeSet<String>) {
@@ -100,6 +104,7 @@ fn snapshot() -> Snapshot {
         player: uid(n),
         name: name.map(str::to_owned),
         points: vec![5, 9, 2, 150, 0, if win { 1 } else { 0 }, 1, 0, 0, 0],
+        vt: None,
     };
     let mut sides = HashMap::new();
     sides.insert("hsd".to_owned(), SideCounts { enlisted: 4, active: 2, last_24h: 300, prev_24h: 100 });
@@ -132,6 +137,12 @@ fn snapshot() -> Snapshot {
         turn_ends: Vec::new(),
         match_rows: Vec::new(),
         match_rows_complete: true,
+        vt_names: HashMap::new(),
+        vt_since: None,
+        pilot_vts: Vec::new(),
+        side_vts: Vec::new(),
+        vt_rows: Vec::new(),
+        vt_rows_complete: true,
     }
 }
 
@@ -484,6 +495,7 @@ fn public_document_size_is_bounded() {
             player: uid(n),
             name: Some(format!("Pilot{n:011}")),
             points: vec![9_999_999; 10],
+            vt: Some((n % 40) as i16),
         })
         .collect();
     // W527: turn 8 (seven closed turns), every listed pilot holds all four award
@@ -509,6 +521,7 @@ fn public_document_size_is_bounded() {
                 player: uid(n),
                 name: Some(format!("Pilot{n:011}")),
                 points: vec![9_999_999; 10],
+                vt: Some((n % 40) as i16),
             })
         })
         .collect();
@@ -525,11 +538,34 @@ fn public_document_size_is_bounded() {
             player: uid(n % 250),
             name: Some(format!("Pilot{:011}", n % 250)),
             points: vec![9_999_999; 10],
+            vt: Some((n % 40) as i16),
+        })
+        .collect();
+    // W531: every battle with a VT, 40 types with names beyond the character
+    // limit (20), every listed pilot with all 40 types driven and destroyed.
+    snap.vt_names = (0..40i16).map(|t| (t, format!("{t:0>32}"))).collect();
+    snap.vt_since = Some(at);
+    snap.pilot_vts = (0..1000u128)
+        .flat_map(|n| (0..40i16).map(move |t| (uid(n), t, 9_999_999, 9_999_999, 9_999_999, 9_999_999, 9_999_999)))
+        .collect();
+    snap.side_vts = SIDES.iter().flat_map(|f| (0..40i16).map(move |t| (f.to_string(), t, 9_999_999))).collect();
+    snap.vt_rows = (0..250u128 * 40)
+        .map(|k| Battle {
+            at: at - chrono::Duration::seconds((k / 2) as i64 * 600),
+            turn: 8,
+            map: 2,
+            faction: if k % 2 == 0 { "prf" } else { "hsd" }.into(),
+            player: uid((k / 80) * 2 + k % 2),
+            name: None,
+            points: vec![9_999_999; 10],
+            vt: Some(((k / 2) % 40) as i16),
         })
         .collect();
     let (doc, files) = build_all(&max, &snap, &mut Placeholders::new(&[1u8; 32], ""));
     let kept = doc["matches"].as_array().unwrap().len();
-    assert!(kept >= 8, "the largest configuration still shows {kept} matches");
+    // W531: with a VT name (20 characters) on every battle and pilot, 5 matches
+    // stay in this extreme case (W529 without VTs: 8); matches give way first.
+    assert!(kept >= 5, "the largest configuration still shows {kept} matches");
     eprintln!("worst case: {kept} of 50 matches kept");
     assert_eq!(doc["pilots"].as_array().unwrap().len(), 250);
     assert_eq!(doc["turns"].as_array().unwrap().len(), 8);
@@ -570,6 +606,7 @@ fn mrow(n: u128, name: Option<&str>, secs: i64, map: i16, f: &str, win: Option<b
             Some(w) => vec![5, 9, kills, kp, 1, w as i64, 1, 0, 0, 0],
             None => vec![kp],
         },
+        vt: None,
     }
 }
 
@@ -815,6 +852,7 @@ fn snapshot_with_turns() -> Snapshot {
             player: uid(1),
             name: Some("Ace One".into()),
             points: vec![1, 2, 1, 10 + k, 0, 1, 1, 0, 0, 0],
+            vt: None,
         })
         .collect();
     snap.sector_counts = vec![(uid(1), 1, 0, 3), (uid(1), 1, 1, 9), (uid(1), 3, 0, 9), (uid(1), 9, 0, 99)];
@@ -1260,4 +1298,188 @@ async fn db_public_export_hides_banned_suspended_and_annulled() {
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await.unwrap();
     let write = sqlx::query("INSERT INTO wartide (round, \"map\") VALUES (32000, 0)").execute(&mut *tx).await;
     assert!(write.is_err(), "a read-only transaction refuses writes");
+}
+
+// ---- W531: VTs ------------------------------------------------------------------
+
+/// `mrow` with a VT type (a won battle, 10 kill points per kill).
+fn vrow(n: u128, secs: i64, map: i16, f: &str, kills: i64, vt: Option<i16>) -> Battle {
+    Battle { vt, ..mrow(n, None, secs, map, f, Some(true), 10 * kills, kills) }
+}
+
+#[test]
+fn public_killed_by_type_only_where_clear() {
+    let rows = vec![
+        // Match A (map 0): HSD 1 with a Vitzh against two PRF Deciders.
+        vrow(1, 0, 0, "hsd", 2, Some(0)),
+        vrow(2, 10, 0, "prf", 1, Some(7)),
+        vrow(3, 20, 0, "prf", 0, Some(7)),
+        // Match B (map 1): the other side drove two types -> nothing by type.
+        vrow(1, 0, 1, "hsd", 3, Some(0)),
+        vrow(2, 10, 1, "prf", 1, Some(5)),
+        vrow(3, 20, 1, "prf", 1, Some(7)),
+        // Match C (map 2): one opponent without a known VT -> nothing by type for HSD.
+        vrow(1, 0, 2, "hsd", 4, Some(2)),
+        vrow(2, 10, 2, "prf", 1, Some(7)),
+        vrow(4, 20, 2, "prf", 1, None),
+        // Match D (map 3): three sides; HSD meets only Deciders, RB meets a Vortex and a Decider.
+        vrow(1, 0, 3, "hsd", 1, Some(2)),
+        vrow(2, 10, 3, "prf", 1, Some(7)),
+        vrow(5, 20, 3, "rb", 5, Some(7)),
+        // Match E (map 4): nobody on another side reported -> nothing.
+        vrow(1, 0, 4, "hsd", 6, Some(0)),
+    ];
+    let groups = group_matches(&rows, chrono::Duration::seconds(MATCH_WINDOW_SECS), true);
+    assert_eq!(groups.len(), 5);
+    let k = killed_by_type(&rows, &groups);
+    let get = |n: u128| {
+        let mut v: Vec<(i16, i64)> = k.get(&uid(n)).map(|m| m.iter().map(|(&t, &c)| (t, c)).collect()).unwrap_or_default();
+        v.sort();
+        v
+    };
+    assert_eq!(get(1), vec![(7, 2 + 1)], "A and D only");
+    // PRF 2: A (opponent Vitzh) 1, B (Vitzh) 1, C (Vortex) 1, D (HSD Vortex + RB Decider: two types) nothing.
+    assert_eq!(get(2), vec![(0, 2), (2, 1)]);
+    assert_eq!(get(3), vec![(0, 1)], "no kills in A, one in B");
+    assert_eq!(get(4), vec![(2, 1)], "the own VT does not matter");
+    assert_eq!(get(5), Vec::<(i16, i64)>::new(), "RB met two types");
+}
+
+#[test]
+fn public_vts_in_the_documents() {
+    let c = cfg();
+    let mut snap = snapshot_with_turns();
+    snap.vt_names = [(0i16, "Vitzh".to_owned()), (7, "Decider".to_owned()), (2, "  Vortex With A Very Long Name  ".to_owned())]
+        .into_iter()
+        .collect();
+    snap.vt_since = Some(Utc.with_ymd_and_hms(2026, 11, 28, 9, 30, 0).unwrap());
+    // Battles: one with a known VT, one with a type without a shop name, one without VT.
+    snap.battles[0].vt = Some(0);
+    snap.battles[1].vt = Some(42);
+    snap.pilot_battles[0].vt = Some(2);
+    // Ace One (uid 1): Vitzh 3 battles, Vortex 3 battles but fewer wins -> favourite Vitzh.
+    snap.pilot_vts = vec![(uid(1), 2, 3, 2, 1, 4, 300), (uid(1), 0, 3, 1, 2, 5, 500), (uid(2), 7, 1, 1, 0, 0, 0)];
+    snap.side_vts = vec![
+        ("hsd".into(), 0, 3),
+        ("hsd".into(), 2, 3),
+        ("hsd".into(), 1, 1),
+        ("hsd".into(), 3, 9),
+        ("prf".into(), 7, 1),
+    ];
+    snap.vt_rows = vec![vrow(1, 0, 0, "hsd", 2, Some(0)), vrow(2, 10, 0, "prf", 0, Some(7))];
+    snap.match_rows = snap.vt_rows.clone();
+    let (doc, files) = build_all(&c, &snap, &mut Placeholders::new(&[7u8; 32], &c.season));
+
+    assert_eq!(doc["vts_since"], "2026-11-28");
+    assert_eq!(doc["battles"][0]["vt"], "Vitzh");
+    assert_eq!(doc["battles"][1]["vt"], "VT 42", "a type without a shop name");
+    assert_eq!(doc["battles"][2]["vt"], Value::Null, "no VT known");
+    let hsd = &doc["sides"][0];
+    assert_eq!(hsd["id"], "hsd");
+    // Most battles first, ties by name, at most three; type 3 has no name.
+    assert_eq!(
+        hsd["top_vts"],
+        serde_json::json!([{"vt": "VT 3", "battles": 9}, {"vt": "Vitzh", "battles": 3}, {"vt": "Vortex With A Very L", "battles": 3}])
+    );
+    assert_eq!(doc["sides"][2]["top_vts"], serde_json::json!([]));
+    let m = &doc["matches"][0];
+    let vts: Vec<&Value> = m["sides"].as_array().unwrap().iter().map(|s| &s["pilots"][0]["vt"]).collect();
+    assert_eq!(vts, vec!["Vitzh", "Decider"]);
+
+    let ace = &files.iter().find(|(_, f)| f["pilot"] == "Ace One").unwrap().1;
+    assert_eq!(ace["favorite_vt"], serde_json::json!({"vt": "Vitzh", "battles": 3}));
+    assert_eq!(
+        ace["vts"],
+        serde_json::json!([
+            {"vt": "Vitzh", "driven": 3, "lost": 1, "wins": 2, "kills": 5, "points": 500},
+            {"vt": "Vortex With A Very L", "driven": 3, "lost": 2, "wins": 1, "kills": 4, "points": 300},
+        ])
+    );
+    assert_eq!(ace["killed_by_type"], serde_json::json!([{"vt": "Decider", "kills": 2}]));
+    assert_eq!(ace["battles"][0]["vt"], "Vortex With A Very L");
+    assert_eq!(ace["battles"][1]["vt"], Value::Null);
+    // A pilot without VT data: empty lists, no favourite.
+    let other = &files.iter().find(|(_, f)| f["pilot"] == "Dee").unwrap().1;
+    assert_eq!((other["vts"].clone(), other["favorite_vt"].clone()), (serde_json::json!([]), Value::Null));
+    assert_eq!(other["killed_by_type"], serde_json::json!([]));
+    // Without any VT data (a season before the update) the fields are there and empty.
+    let (doc, _) = build_all(&c, &snapshot(), &mut Placeholders::new(&[7u8; 32], &c.season));
+    assert_eq!(doc["vts_since"], Value::Null);
+    assert_eq!(doc["battles"][0]["vt"], Value::Null);
+}
+
+/// The VT statistics from the database: own VTs exact, hidden pilots never.
+#[tokio::test]
+async fn db_public_vts() {
+    let Some(pool) = test_pool().await else { return };
+    let round = 2000 + (fresh() % 28000) as i16;
+    let tag = fresh() % 100_000;
+    let ace = format!("Vt Ace {tag}");
+    let bob_name = format!("Vt Bob {tag}");
+    let a = player(&pool, "hsd", Some(&ace), false, false).await;
+    let b = player(&pool, "prf", Some(&bob_name), false, false).await;
+    let c2 = player(&pool, "prf", Some(&format!("Vt Cat {tag}")), false, false).await;
+    let ban = player(&pool, "prf", Some(&format!("Vt Ban {tag}")), true, false).await;
+    // The newest user_points result of a player gets a VT.
+    let vt = |who: (Uuid, Uuid), faction: &'static str, t: i16| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO battle_vt (identity_id, player_id, faction, vt_type, vt_types, result_id)
+                 SELECT $1, $2, $3::faction, $4, ARRAY[$4], max(result_id) FROM gateway_result
+                 WHERE player_id = $2 AND kind = 'user_points'",
+            )
+            .bind(who.1)
+            .bind(who.0)
+            .bind(faction)
+            .bind(t)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    let st = |kills: i64, deaths: i64, win: i64| [10, 20, kills, 100 * kills, deaths, win, 1, 0, 0, 0];
+    // Sector 0: ace (Vitzh) against two Deciders; sector 1: ace (Vitzh) against Falchion + Decider;
+    // sector 2: ace (Vortex) against bob without VT and the banned pilot (Falchion).
+    result(&pool, a, round, 1, 0, "hsd", st(2, 1, 1), 10, false).await;
+    vt(a, "hsd", 0).await;
+    result(&pool, b, round, 1, 0, "prf", st(1, 1, 0), 10, false).await;
+    vt(b, "prf", 7).await;
+    result(&pool, c2, round, 1, 0, "prf", st(0, 2, 0), 10, false).await;
+    vt(c2, "prf", 7).await;
+    result(&pool, a, round, 1, 1, "hsd", st(3, 0, 1), 10, false).await;
+    vt(a, "hsd", 0).await;
+    result(&pool, b, round, 1, 1, "prf", st(0, 1, 0), 10, false).await;
+    vt(b, "prf", 5).await;
+    result(&pool, c2, round, 1, 1, "prf", st(0, 1, 0), 10, false).await;
+    vt(c2, "prf", 7).await;
+    result(&pool, a, round, 1, 2, "hsd", st(1, 1, 0), 10, false).await;
+    vt(a, "hsd", 2).await;
+    result(&pool, b, round, 1, 2, "prf", st(1, 0, 1), 10, false).await;
+    result(&pool, ban, round, 1, 2, "prf", st(9, 0, 1), 10, false).await;
+    vt(ban, "prf", 5).await;
+
+    let c = PublicConfig { leaderboard_size: 50, battles: 50, ..cfg() };
+    let snap = collect(&pool, c.battles, Some(round)).await.expect("collect");
+    assert!(snap.vt_since.is_some());
+    let mut mine: Vec<_> = snap.pilot_vts.iter().filter(|r| r.0 == a.0).map(|r| (r.1, r.2, r.3, r.4, r.5, r.6)).collect();
+    mine.sort();
+    assert_eq!(mine, vec![(0, 2, 1, 2, 5, 500), (2, 1, 1, 0, 1, 100)]);
+    assert!(snap.pilot_vts.iter().all(|r| r.0 != ban.0), "hidden pilots have no VT statistics");
+    let (doc, files) = build_all(&c, &snap, &mut Placeholders::new(&[3u8; 32], "test"));
+    let side = |i: usize| doc["sides"][i]["top_vts"].clone();
+    assert_eq!(side(0), serde_json::json!([{"vt": "Vitzh", "battles": 2}, {"vt": "Vortex", "battles": 1}]));
+    assert_eq!(side(1), serde_json::json!([{"vt": "Decider", "battles": 3}, {"vt": "Falchion", "battles": 1}]));
+    let file = &files.iter().find(|(_, f)| f["pilot"] == ace.as_str()).unwrap().1;
+    assert_eq!(file["favorite_vt"], serde_json::json!({"vt": "Vitzh", "battles": 2}));
+    assert_eq!(file["vts"][0], serde_json::json!({"vt": "Vitzh", "driven": 2, "lost": 1, "wins": 2, "kills": 5, "points": 500}));
+    // Only sector 0 is clear (two Deciders); sector 1 has two types, sector 2 an unknown VT.
+    assert_eq!(file["killed_by_type"], serde_json::json!([{"vt": "Decider", "kills": 2}]));
+    let bob = &files.iter().find(|(_, f)| f["pilot"] == bob_name.as_str()).unwrap().1;
+    assert_eq!(bob["killed_by_type"], serde_json::json!([{"vt": "Vitzh", "kills": 1}, {"vt": "Vortex", "kills": 1}]));
+    let text = String::from_utf8(render(&doc).unwrap()).unwrap();
+    assert!(!text.contains("Vt Ban"));
+    let newest = doc["battles"].as_array().unwrap();
+    assert!(newest.iter().any(|b| b["pilot"] == ace.as_str() && b["vt"] == "Vortex"));
+    assert!(newest.iter().any(|b| b["pilot"] == bob_name.as_str() && b["vt"].is_null()), "bob's last battle has no VT");
 }

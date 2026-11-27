@@ -393,3 +393,143 @@ fn db_gateway_results_plausibility_annul() {
             .is_none());
     });
 }
+
+/// W531: the VT of a battle. A sortie (0x1047) is linked to the pilot's next
+/// result (0x5026): the first owned VT of the sortie names the battle; no
+/// sortie, an old sortie, a foreign VT or another side give no VT; a sortie
+/// belongs to one result; of two open sorties the newer one counts. Every
+/// transaction is its own connection, so a reconnect changes nothing.
+#[test]
+fn db_gateway_battle_vt() {
+    globals_runtime().block_on(async {
+        let Some(pool) = global_pool().await else { return };
+        let gw = new_gateway(test_core(&pool).await, generous_limits());
+        let acc = synthetic_account(13);
+        let ticket = TicketSpec::valid(acc).sign();
+        let (_, p) = transact(&gw, &ticket, 0, 0x5022, &new_user_info("GwVt", "x", HSD)).await;
+        assert_eq!(p[0], 0);
+        let player = player_of(&pool, acc).await.unwrap();
+        let other = Uuid::from_u128(0x5331_0000_0000_0000_0000_0000_0000_0013);
+        // Garage: Vitzh (0) and Vortex (2) of the pilot, a Scare Face (8) of someone else.
+        // Rerunnable on the same database: the serials are fixed.
+        sqlx::query("DELETE FROM garage WHERE \"serial\" IN (953101, 953102, 953103)").execute(&pool).await.unwrap();
+        for (t, s, owner) in [(0i16, 953_101i64, player), (2, 953_102, player), (8, 953_103, other)] {
+            sqlx::query("INSERT INTO garage (\"type\", \"serial\", xuid, faction) VALUES ($1, $2, $3, 'hsd')")
+                .bind(t)
+                .bind(s)
+                .bind(owner)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let (_, p) = transact(&gw, &ticket, 0, 0x1030, &[]).await;
+        let (round, turn) = (u16::from_le_bytes([p[0], p[1]]), u16::from_le_bytes([p[2], p[3]]));
+        let result = |map: u8| {
+            let gw = gw.clone();
+            let ticket = ticket.clone();
+            async move {
+                let (cmd, p) = transact(&gw, &ticket, 0, 0x5026, &add_user_point(round, turn, map, [1; 10])).await;
+                assert_eq!((cmd, p[0]), (0x6026, 0));
+            }
+        };
+        let sortie = |vts: Vec<(u16, u32)>| {
+            let gw = gw.clone();
+            let ticket = ticket.clone();
+            async move {
+                let (cmd, p) = transact(&gw, &ticket, 0, 0x1047, &vt_entries(&vts)).await;
+                assert_eq!((cmd, p[0]), (0x2047, 0));
+            }
+        };
+        // VT per result of this player, oldest first (None = no VT).
+        let vts = || async {
+            sqlx::query_scalar::<_, Option<i16>>(
+                "SELECT b.vt_type FROM gateway_result g LEFT JOIN battle_vt b ON b.result_id = g.result_id
+                 WHERE g.player_id = $1 AND g.kind = 'user_points' ORDER BY g.result_id",
+            )
+            .bind(player)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        };
+        let open_sorties = || async {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM battle_vt WHERE player_id = $1 AND result_id IS NULL")
+                .bind(player)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+
+        // 1. No sortie: the result has no VT.
+        result(1).await;
+        assert_eq!(vts().await, vec![None]);
+
+        // 2. Sortie with two VTs: the first one (Vortex) names the battle.
+        sortie(vec![(2, 953_102), (0, 953_101)]).await;
+        let (vt_type, types): (i16, Vec<i16>) =
+            sqlx::query_as("SELECT vt_type, vt_types FROM battle_vt WHERE player_id = $1 AND result_id IS NULL")
+                .bind(player)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((vt_type, types), (2, vec![2, 0]));
+        let sortied: i64 = sqlx::query_scalar("SELECT count(*) FROM garage WHERE xuid = $1 AND sortied")
+            .bind(player)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sortied, 2, "the sortie itself is unchanged");
+        result(2).await;
+        assert_eq!(vts().await, vec![None, Some(2)]);
+
+        // 3. A second result without a new sortie: the sortie is used up.
+        result(2).await;
+        assert_eq!(vts().await, vec![None, Some(2), None]);
+
+        // 4. A VT the pilot does not own is ignored; a list of only such VTs is no sortie.
+        sortie(vec![(8, 953_103)]).await;
+        assert_eq!(open_sorties().await, 0);
+        sortie(vec![(8, 953_103), (0, 953_101)]).await;
+        let t: Vec<i16> = sqlx::query_scalar("SELECT vt_types FROM battle_vt WHERE player_id = $1 AND result_id IS NULL")
+            .bind(player)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(t, vec![0], "only the own Vitzh");
+
+        // 5. That sortie is too old (aborted mission): not linked.
+        sqlx::query("UPDATE battle_vt SET sortied_at = now() - INTERVAL '121 minutes' WHERE player_id = $1 AND result_id IS NULL")
+            .bind(player)
+            .execute(&pool)
+            .await
+            .unwrap();
+        result(3).await;
+        assert_eq!(vts().await, vec![None, Some(2), None, None]);
+
+        // 6. Two open sorties (the first mission aborted): the newer one counts.
+        sortie(vec![(0, 953_101)]).await;
+        sortie(vec![(2, 953_102)]).await;
+        result(3).await;
+        assert_eq!(vts().await, vec![None, Some(2), None, None, Some(2)]);
+
+        // 7. Sortie for HSD, then a transfer to PRF: the PRF result gets no HSD VT.
+        sortie(vec![(0, 953_101)]).await;
+        let (_, p) = transact(&gw, &ticket, 0, 0x5025, &[PRF]).await;
+        assert_eq!(p[0], 0);
+        result(1).await;
+        assert_eq!(vts().await, vec![None, Some(2), None, None, Some(2), None]);
+        // Two old open sorties (step 5 and 6) and the HSD one stay unlinked.
+        assert_eq!(open_sorties().await, 3);
+
+        // Nothing but types, sides and times is stored.
+        let cols: Vec<String> = sqlx::query_scalar(
+            "SELECT column_name::text FROM information_schema.columns WHERE table_name = 'battle_vt' ORDER BY ordinal_position",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            cols,
+            ["battle_vt_id", "sortied_at", "identity_id", "player_id", "faction", "vt_type", "vt_types", "result_id", "linked_at"]
+        );
+    });
+}

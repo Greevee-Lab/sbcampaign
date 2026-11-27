@@ -170,3 +170,15 @@ pub fn add_mission_point(round: u16, turn: u16, map: u8, points: u32, faction: u
     p.push(faction);
     p
 }
+
+/// W531: 0x1047 VtSortie / 0x3047 VtReturn payload: u16 count, then
+/// count x (u16 type, u32 serial).
+pub fn vt_entries(vts: &[(u16, u32)]) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&(vts.len() as u16).to_le_bytes());
+    for &(t, s) in vts {
+        p.extend_from_slice(&t.to_le_bytes());
+        p.extend_from_slice(&s.to_le_bytes());
+    }
+    p
+}

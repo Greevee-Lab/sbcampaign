@@ -8,7 +8,7 @@ use crate::{
     command::{self, rx::RxCommand, tx::TxCommand},
     core_api::{
         CampaignCore, ResolvedIdentity, VerifiedBy, dispatch::dispatch,
-        gateway::{GameWrite, GatewayCore, ResultKind, ResultRecord},
+        gateway::{GameWrite, GatewayCore, ResultKind, ResultRecord, SortieRecord},
         transport::BoxedTransport,
     },
     ticket::Ticket,
@@ -184,6 +184,16 @@ async fn command<C: CampaignCore + GatewayCore>(
         }),
         _ => None,
     };
+    // W531: the VTs of a sortie, for the battle statistics.
+    let sortie = match &rx {
+        RxCommand::VtSortie { vt_list } if !vt_list.is_empty() => Some(SortieRecord {
+            identity_id: identity.identity_id,
+            player_id: identity.player_id,
+            faction: client.faction,
+            vts: vt_list.iter().map(|v| (v.id(), v.serial())).collect(),
+        }),
+        _ => None,
+    };
 
     // The registered Xbox Live name is the display name from the ticket.
     let rx = match rx {
@@ -203,6 +213,11 @@ async fn command<C: CampaignCore + GatewayCore>(
             if let Some(record) = record {
                 if let Err(e) = core.record_result(record).await {
                     let _ = systemd_log!(3, "gateway {:08x}: result ledger: {}", client.session_id, e);
+                }
+            }
+            if let Some(sortie) = sortie {
+                if let Err(e) = core.record_sortie(sortie).await {
+                    let _ = systemd_log!(3, "gateway {:08x}: sortie log: {}", client.session_id, e);
                 }
             }
         }
