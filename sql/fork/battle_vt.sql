@@ -23,9 +23,11 @@ CREATE TABLE battle_vt (
     identity_id  uuid        NOT NULL,
     player_id    uuid        NOT NULL,
     faction      faction     NOT NULL,
-    -- The VT the pilot drives: the first VT of the sortie.
+    -- The VT type of the battle: the first VT of the sortie. The game sends
+    -- VTs of one type per sortie (the type picked in the sortie menu; more
+    -- than one VT = reserve VTs for a respawn), so this is the type for all.
     vt_type      smallint    NOT NULL,
-    -- Every VT type of the sortie in the game's order (normally one).
+    -- Every VT type of the sortie in the game's order (one entry per VT).
     vt_types     smallint[]  NOT NULL CHECK (cardinality(vt_types) >= 1),
     -- The pilot's result of this battle; NULL until it arrives (or for ever,
     -- when the mission was aborted).

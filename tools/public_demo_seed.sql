@@ -7,7 +7,7 @@
 -- shots, every 7th pilot only played once this turn (below the page's minimum
 -- for rates). W527: settings rows for the closed turns 1-3 (turn reports),
 -- 2-7 missions per pilot and turn (so the game's award minimums are reached).
--- W531: VTs of the battles of the last 30 hours (battle_vt).
+-- W531: VTs of the battles of turn 4 (battle_vt).
 -- Used by tools/public_demo.sh.
 
 BEGIN;
@@ -139,19 +139,20 @@ SELECT pg_temp.demo_match(270, 2, ARRAY[49, 52, 1, 4], ARRAY[54, 3, 6, 9]);     
 SELECT pg_temp.demo_match(285, 1, ARRAY[44], ARRAY[18]);                                -- 1:1 RB beats HSD
 SELECT pg_temp.demo_match(295, 3, ARRAY[50, 53], ARRAY[7, 10]);                         -- 2:2 RB beats PRF
 
--- W531: VTs for the battles of the last 30 hours (as if the update came then):
--- every pilot has a main VT of its side (shop up to turn 4) and now and then a
--- second one; about every seventh battle has no VT (no sortie recorded). The
--- 1:1 matches therefore give clear "destroyed by type" counts. Demo only.
+-- W531: VTs for the battles of turn 4 (as if the update came with that turn):
+-- every pilot has a main VT of its side (shop up to turn 4) and often a
+-- second or third one; about every seventh battle has no VT (no sortie
+-- recorded). The 1:1 matches therefore give clear "destroyed by type" counts.
+-- Demo only.
 INSERT INTO battle_vt (sortied_at, identity_id, player_id, faction, vt_type, vt_types, result_id, linked_at)
 SELECT g.at - INTERVAL '18 minutes', g.identity_id, g.player_id, g.faction, v.t, ARRAY[v.t, v.t], g.result_id, g.at
 FROM gateway_result g
 CROSS JOIN LATERAL (
-    SELECT CASE WHEN g.result_id % 4 = 0 THEN a[1 + (abs(hashtext(g.player_id::text)) / 7) % cardinality(a)]
-                ELSE a[1 + abs(hashtext(g.player_id::text)) % cardinality(a)] END AS t
+    SELECT a[1 + (abs(hashtext(g.player_id::text))
+                  + CASE WHEN g.result_id % 3 = 0 THEN 1 WHEN g.result_id % 5 = 0 THEN 2 ELSE 0 END) % cardinality(a)] AS t
     FROM (SELECT array_agg("type" ORDER BY "type") AS a FROM shop WHERE faction = g.faction AND turn <= 4) s
 ) v
 WHERE g.kind = 'user_points' AND g.round = 1 AND g.turn = 4 AND g.annulled_at IS NULL
-  AND g.at > now() - INTERVAL '30 hours' AND g.result_id % 7 <> 3 AND v.t IS NOT NULL;
+  AND g.result_id % 7 <> 3 AND v.t IS NOT NULL;
 
 COMMIT;
